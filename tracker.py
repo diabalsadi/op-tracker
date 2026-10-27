@@ -98,7 +98,8 @@ class Tracker:
             # before the versioned tracker gets a chance to run its migration.
             if 'archived' not in {r['name'] for r in self.rows('PRAGMA table_info(members)')}:
                 self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_tpm ON members(team_id) WHERE role='TPM'")
-                self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_qa_slot ON members(team_id,qa_slot) WHERE role='QA'")
+            self.db.execute('DROP INDEX IF EXISTS one_qa_slot')
+            self.db.execute('DROP INDEX IF EXISTS active_qa')
             if 'author_jira' not in {r['name'] for r in self.rows('PRAGMA table_info(manual_comments)')}:
                 self.db.execute('ALTER TABLE manual_comments ADD COLUMN author_jira TEXT')
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('monthly_target','16')")

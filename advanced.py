@@ -70,7 +70,7 @@ class Tracker(BaseTracker):
             self.db.execute('DROP INDEX IF EXISTS one_tpm')
             self.db.execute('DROP INDEX IF EXISTS one_qa_slot')
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_tpm ON members(team_id) WHERE role='TPM' AND archived=0")
-            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_qa ON members(team_id,qa_slot) WHERE role='QA' AND archived=0")
+            self.db.execute('DROP INDEX IF EXISTS active_qa')
             if 'team_assignments' not in {r['name'] for r in self.rows('PRAGMA table_info(members)')}:
                 self.db.execute('ALTER TABLE members ADD COLUMN team_assignments TEXT')
             for m in self.rows('SELECT * FROM members'):
@@ -161,6 +161,8 @@ class Tracker(BaseTracker):
                 raise ValueError('Choose active teams for every assignment')
             if member['role']=='QA' and assignment.get('qa_slot') not in ('Primary','Secondary'):
                 raise ValueError('Choose a QA position for each team')
+            if member['role'] != 'TPM':
+                continue
             # Check both the effective date and later/current membership versions.
             times=[effective]+[r['effective_at'] for r in self.rows('SELECT DISTINCT effective_at FROM member_versions WHERE effective_at>?',(effective,))]
             for at in times:
@@ -168,8 +170,8 @@ class Tracker(BaseTracker):
                     if other['id']==member.get('id') or other['role']!=member['role']:
                         continue
                     for existing in assignments(other):
-                        if existing['team_id']==team_id and (member['role']=='TPM' or member['role']=='QA' and existing.get('qa_slot')==assignment.get('qa_slot')):
-                            raise ValueError('That team role is occupied during the selected assignment period')
+                        if existing['team_id']==team_id:
+                            raise ValueError('That team already has a TPM during the selected assignment period')
 
     @calculation_read
     def workflow_at(self, status):

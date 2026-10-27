@@ -431,18 +431,20 @@ class HistoricalTests(unittest.TestCase):
                 self.assertIsNone(member['util'])
         self.assertAlmostEqual(self.t.report('2026-08-01','2026-08-31')['target'],16)
 
-    def test_secondary_team_slots_prevent_conflicts_and_unsafe_archive(self):
+    def test_shared_qa_slots_allow_colleagues_and_keep_tpm_exclusive(self):
         self.shared_member();qa=self.shared_member('QA')
         with self.assertRaises(ValueError):
             self.t.save('members',{'name':'Other TPM','jira_id':'other-tpm','role':'TPM','country':'JO','team_id':self.b,'effective_at':'2026-08-01'})
-        with self.assertRaises(ValueError):
-            self.t.save('members',{'name':'Other QA','jira_id':'other-qa','role':'QA','country':'JO','team_id':self.b,'qa_slot':'Secondary','effective_at':'2026-08-01'})
+        other_qa=self.t.save('members',{'name':'Other QA','jira_id':'other-qa','role':'QA','country':'JO','team_id':self.b,'qa_slot':'Secondary','effective_at':'2026-08-01'})
+        self.assertTrue(other_qa)
         with self.assertRaises(ValueError):
             self.t.archive({'resource':'teams','id':self.b})
         self.t.archive({'resource':'members','id':qa,'effective_at':'2026-08-01'})
         self.t.save('members',{'name':'Replacement QA','jira_id':'replacement-qa','role':'QA','country':'JO','team_id':self.b,'qa_slot':'Secondary','effective_at':'2026-08-02'})
-        with self.assertRaises(ValueError):
-            self.t.archive({'resource':'members','id':qa,'archived':False,'effective_at':'2026-08-03'})
+        self.t.archive({'resource':'members','id':qa,'archived':False,'effective_at':'2026-08-03'})
+        reopened=Tracker(self.t.path)
+        self.assertEqual(len([m for m in reopened.members_at('2026-08-04') if m['role']=='QA']),3)
+        reopened.db.close()
 
     def test_shared_assignments_restart_history_and_frozen_report(self):
         identity=self.shared_member()
