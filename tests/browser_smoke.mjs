@@ -29,6 +29,26 @@ try {
     await page.setViewportSize({width:1280,height:960});
   }
   await page.goto(origin);await page.locator('#delivery-chart').waitFor();
+  const utcNow=new Date(), dateEnd=utcNow.toISOString().slice(0,10), year=utcNow.getUTCFullYear();
+  for(const preset of ['year','quarter','month']){
+    const month=preset==='year'?0:preset==='quarter'?Math.floor(utcNow.getUTCMonth()/3)*3:utcNow.getUTCMonth();
+    const expectedStart=`${year}-${String(month+1).padStart(2,'0')}-01`;
+    const response=page.waitForResponse(r=>r.url().includes('/api/report?')&&new URL(r.url()).searchParams.get('start_date')===expectedStart);
+    await page.locator(`[data-range="${preset}"]`).click();await response;
+    await page.waitForFunction(([a,b])=>document.querySelector('#start-date').value===a&&document.querySelector('#end-date').value===b,[expectedStart,dateEnd]);
+    await page.locator(`[data-range="${preset}"][aria-pressed=true]`).waitFor();
+    const rendered=await page.locator('.grid .panel').first().innerText();
+    if(!rendered.includes('SP target'))throw Error('Preset did not refresh report: '+preset);
+  }
+  // A preset must override custom dates, including an input that still has focus.
+  await page.locator('#start-date').fill(`${year}-07-01`);
+  await page.locator('#start-date').dispatchEvent('change');
+  await page.waitForFunction(()=>document.querySelectorAll('[data-range][aria-pressed=true]').length===0);
+  await page.locator('#end-date').fill(`${year}-09-30`);
+  await page.locator('[data-range="year"]').click();
+  await page.waitForFunction(y=>document.querySelector('#start-date').value===y+'-01-01'&&document.querySelector('[data-range="year"]').getAttribute('aria-pressed')==='true',year);
+  await page.locator('[data-range="month"]').focus();await page.keyboard.press('Enter');
+  await page.locator('[data-range="month"][aria-pressed=true]').waitFor();
   for(const name of ['Overview','Delivery','Utilization','Performance','Rankings','Members','Tickets','Imports','Administration']){
     await page.locator(`nav button[data-page="${name}"]`).click();await page.waitForFunction(n=>document.querySelector('#title').textContent===n,name);
     if(name==='Rankings')for(const scope of ['Team','Role','Individual']){await page.locator('#ranking-scope').selectOption(scope);await page.waitForFunction(s=>document.querySelector('#ranking-scope')?.value===s&&document.querySelector('#content h2')?.textContent===s+' ranking',scope);}
@@ -69,6 +89,69 @@ try {
   await page.locator('nav button[data-page="Tickets"]').click();await page.locator('[data-ticket]').first().click();await page.locator('#comment-form').waitFor();
   await scan('Ticket lifecycle');
   await page.locator('#comment-form textarea').fill('Browser-tested follow-up');await page.locator('#comment-form button').click();await page.getByText('Follow-up saved.',{exact:true}).waitFor();
+  await page.locator('.comment-revision-form textarea').fill('Revised browser follow-up');
+  await page.locator('.comment-revision-form input[name=reason]').fill('Fix test wording');
+  await page.locator('.comment-revision-form button').click();await page.getByText('Comment revision saved; original entry retained.',{exact:true}).waitFor();
+  await page.locator('#correction-form input[name=reason]').fill('Browser evidence repair');
+  await page.locator('#correction-form input[name=correct_sp]').fill('8');
+  await page.locator('#correction-form button').click();await page.getByText('Evidence correction saved. Revise finalized months explicitly if needed.',{exact:true}).waitFor();
+  await page.locator('nav button[data-page="Imports"]').click();await page.locator('#import-form').waitFor();
+  await page.locator('#import-form details summary').click();
+  await page.locator('[name=map_key]').fill('Issue key');
+  await page.locator('[name=profile_name]').fill('Browser mapping');
+  await page.locator('#save-profile').click();await page.getByText('Import mapping profile saved.',{exact:true}).waitFor();
+  await page.locator('[name=profile_id]').selectOption({label:'Browser mapping'});
+  if(await page.locator('[name=map_key]').inputValue()!=='Issue key')throw Error('Mapping profile did not reload');
+  const upload=path.join(folder,'browser-upload.csv');
+  fs.writeFileSync(upload,'Issue key,Summary,Status,Assignee Id,Story Points,Priority\nOP-99,ملف اختبار,In Progress,dev-a,3,High\n');
+  await page.locator('#csv-file').setInputFiles(upload);
+  await page.locator('#import-form button.primary').click();await page.locator('#commit-import').waitFor();
+  await page.locator('#commit-import').click();await page.getByText('Imported 1 tickets. Preserved prior snapshots.',{exact:true}).waitFor();
+  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#export-report').waitFor();
+  const downloadPromise=page.waitForEvent('download');await page.locator('#export-report').click();
+  const download=await downloadPromise;await download.saveAs(path.join(folder,'export.csv'));
+  if(!fs.readFileSync(path.join(folder,'export.csv'),'utf8').includes('Delivered SP'))throw Error('CSV export missing header');
+  await page.locator('nav button[data-page="Administration"]').click();
+  await page.locator('[data-tab="Teams"]').click();
+  await page.locator('#team-form input[name=name]').fill('فريق اختبار باسم طويل لعرض الأسماء');
+  await page.locator('#team-form button').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
+  let liveState=await (await fetch(origin+'/api/state')).json();
+  const createdTeam=liveState.teams.find(t=>t.name.startsWith('فريق')).id;
+  await page.locator(`[data-edit-team="${createdTeam}"]`).click();
+  await page.locator('#team-form input[name=name]').fill('Renamed browser team');
+  await page.locator('#team-form button').click();await page.getByRole('heading',{name:'Renamed browser team',exact:true}).waitFor();
+  page.on('dialog',dialog=>dialog.accept());
+  await page.locator(`[data-archive-team="${createdTeam}"]`).click();
+  await page.locator(`[data-reactivate-team="${createdTeam}"]`).waitFor();
+  await page.locator(`[data-reactivate-team="${createdTeam}"]`).click();
+  await page.locator(`[data-archive-team="${createdTeam}"]`).waitFor();
+  await page.locator('[data-tab="Members"]').click();
+  liveState=await (await fetch(origin+'/api/state')).json();
+  const createdMember=liveState.members.find(m=>m.jira_id==='browser-user').id;
+  await page.locator(`[data-archive-member="${createdMember}"]`).click();
+  await page.locator(`[data-reactivate-member="${createdMember}"]`).waitFor();
+  await page.locator(`[data-reactivate-member="${createdMember}"]`).click();
+  await page.locator(`[data-archive-member="${createdMember}"]`).waitFor();
+  await page.locator('[data-edit-member="1"]').click();
+  await page.locator('#member-form input[name=name]').fill('Test Developer · اسم عربي طويل للاختبار');
+  await page.locator('#member-form input[name=effective_at]').fill('2026-10-01T09:00');
+  await page.locator('#member-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
+  await page.locator('[data-tab="Monthly records"]').click();
+  await page.locator('#finalize-form input[name=month]').fill('2026-09');
+  await page.locator('#finalize-form input[name=reason]').fill('Browser finalization');
+  await page.locator('#finalize-form button').click();await page.getByText('2 monthly record(s) saved.',{exact:true}).waitFor();
+  await page.locator('#finalize-form input[name=month]').fill('2026-09');
+  await page.locator('#finalize-form input[name=reason]').fill('Browser explicit revision');
+  await page.locator('#finalize-form select[name=revise]').selectOption('yes');
+  await page.locator('#finalize-form button').click();await page.getByText('2 monthly record(s) saved.',{exact:true}).waitFor();
+  await page.locator('[data-tab="Backup & restore"]').click();
+  await page.locator('#backup').click();await page.getByText('Backup created in data/backups/',{exact:false}).waitFor();
+  const selectedBackup=await page.locator('#restore-form select').inputValue();
+  await post('save/teams',{name:'Created after UI backup'});
+  await page.locator('#restore-form input[name=confirmation]').fill('RESTORE');
+  await page.locator('#restore-form button').click();await page.getByText('Backup restored. A safety backup of the previous database was retained.',{exact:true}).waitFor();
+  const restored=await (await fetch(origin+'/api/state')).json();
+  if(restored.teams.some(t=>t.name==='Created after UI backup'))throw Error('UI restore failed: '+selectedBackup);
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}
@@ -76,5 +159,5 @@ try {
   if(contrast.color==='rgb(0, 0, 0)')throw Error('Metric text is black');
   if(process.env.QA_SCREENSHOTS){fs.mkdirSync(process.env.QA_SCREENSHOTS,{recursive:true});await page.setViewportSize({width:1280,height:960});await page.screenshot({path:path.join(process.env.QA_SCREENSHOTS,'overview.png'),fullPage:true});}
   if(errors.length)throw Error(errors.join('\n'));
-  console.log('Browser checks passed: all pages/admin sections, record creation, rankings, Q3 target, annual profiles, follow-up, real Chart.js, six viewport sizes.');
+  console.log('Browser checks passed: all pages/admin sections, six viewport sizes, preset/custom dates, keyboard activation, mappings and file import, comments/revisions/corrections, exports, team/member archive/reactivation, finalization/revision, backup/restore, rankings, profiles, real Chart.js.');
 } finally {if(browser)await browser.close();server.kill();}

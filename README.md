@@ -28,7 +28,7 @@ python server.py --port 9000 --db path/to/tracker.sqlite3
 3. **Calendars:** choose weekend days and add country holidays, including date ranges. Existing dates can be edited or removed.
 4. **Workflow:** map your Jira statuses to active, paused, completed, cancelled or backlog categories; configure accountable roles and critical-priority names.
 5. **Workflow rules:** define the severity/estimate combinations, durations and deductions your organization chooses. Effective dates preserve earlier rule versions.
-6. **Targets:** review your delivery and follow-up policy. Policy changes have effective dates.
+6. **Targets:** review your delivery and follow-up policy. Policy changes have effective dates. Targets also configures the Critical completion window and reward per owner.
 7. **Sprints:** optionally define reporting periods and team scope.
 8. **Imports:** preview and commit your daily CSV snapshot.
 
@@ -48,7 +48,7 @@ Unattributable or undated comments remain visible but cannot establish a follow-
 
 ## Reports
 
-- Start/end date pickers combine months, quarters or custom periods. Presets select the current month, quarter or year. Reporting endpoint dates and event grouping use UTC; working-time calculations use country calendars.
+- Start/end date pickers combine months, quarters or custom periods. Presets select the current month, quarter or year through today, with a highlighted selection and the applied UTC dates. In the first month of a quarter, month-to-date and quarter-to-date share the same start date. Reporting endpoint dates and event grouping use UTC; working-time calculations use country calendars.
 - Historical member assignments and active periods determine period targets. Partial months are prorated using working time.
 - Monthly performance records are calculated separately. Multi-month views average eligible monthly records; selecting part of a month does not create another score baseline.
 - Individual, role and team rankings have separate performance/utilization views. Roles without delivery targets are not assigned utilization values.
@@ -68,7 +68,7 @@ An export containing aggregate Time in Status data does not establish chronologi
 
 `data/tracker.sqlite3` contains configuration, original CSV contents, snapshots, comments, audit history and monthly records. `data/` is excluded from Git. Automatic consistent backups run before imports and important historical operations; the newest 30 are retained in `data/backups/`.
 
-**Administration → Backup & restore** creates backups and restores a listed snapshot after explicit confirmation. Restore validates database integrity and creates a safety backup first. For manual restoration, stop the server, retain a copy of the current database, replace the database file with your chosen backup, and restart.
+**Administration → Backup & restore** creates backups and restores a listed snapshot after explicit confirmation. Restore validates integrity, references and application readability in an isolated copy, then creates a safety backup before replacing the active database. For manual restoration, stop the server, retain a copy of the current database, replace the database file with your chosen backup, and restart.
 
 This is a single-operator localhost application. The separately hosted design prototype uses sample data and is not connected to your database.
 
@@ -90,6 +90,6 @@ npx playwright install chromium
 node tests/browser_smoke.mjs
 ```
 
-The browser check starts an isolated temporary database, exercises navigation and administration, uses real Chart.js, and scans desktop/mobile widths. `CHROMIUM_PATH`, `PLAYWRIGHT_MODULE`, `PYTHON`, `TEST_PORT`, and `QA_SCREENSHOTS` optionally select an existing browser/runtime or screenshot directory. Native Windows execution must be checked on a Windows machine; the startup scripts and timezone dependency are provided.
+The browser check starts an isolated temporary database, exercises navigation, date presets and custom dates, file selection and mapping profiles, import preview/commit, exports, corrections, comment revisions, archive/reactivation, monthly revisions and UI restore. It uses real Chart.js and scans desktop/mobile widths. `CHROMIUM_PATH`, `PLAYWRIGHT_MODULE`, `PYTHON`, `TEST_PORT`, and `QA_SCREENSHOTS` optionally select an existing browser/runtime or screenshot directory. Native Windows execution must be checked on a Windows machine; the startup scripts and timezone dependency are provided.
 
 Chart.js is vendored with its license header. Fonts use installed Inter/Montserrat where available and system fallbacks; there are no external font or analytics requests.
