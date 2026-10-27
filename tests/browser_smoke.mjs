@@ -152,6 +152,30 @@ try {
   await page.locator('#restore-form button').click();await page.getByText('Backup restored. A safety backup of the previous database was retained.',{exact:true}).waitFor();
   const restored=await (await fetch(origin+'/api/state')).json();
   if(restored.teams.some(t=>t.name==='Created after UI backup'))throw Error('UI restore failed: '+selectedBackup);
+  const profileMember=await post('save/members',{name:'Example Member',jira_id:'example-profile',role:'Dev',country:'JO',team_id:team.id,effective_at:'2026-07-01'});
+  await post('import/commit',{filename:'synthetic-profile.csv',snapshot_at:'2026-10-26T12:00:00Z',csv:'Issue key,Summary,Status,Assignee Id,Story Points\n'+[
+    ['PROFILE-1','Example one','In Progress',3],['PROFILE-2','Example two','Code Review',3],
+    ['PROFILE-3','Example three','Code Review',3],['PROFILE-4','Example four','QA',3],
+    ['PROFILE-5','Example five','Design Review',2],['PROFILE-6','Example six','Design Review',3]
+  ].map(([key,title,status,sp])=>[key,title,status,'example-profile',sp].join(',')).join('\n')});
+  await page.reload();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Members"]').click();
+  await page.locator(`[data-person="${profileMember.id}"]`).click();
+  await page.getByText('6 tickets · 17 SP',{exact:true}).waitFor();
+  if(await page.locator('#profile-ticket-list [data-ticket]').count()!==6)throw Error('Member tickets missing');
+  await page.locator('#profile-ticket-status').selectOption('Code Review');
+  await page.getByText('2 tickets · 6 SP',{exact:true}).waitFor();
+  if(await page.locator('#profile-ticket-list [data-ticket]').count()!==2)throw Error('Status filter did not narrow tickets');
+  await page.locator('[data-profile-status="QA"]').click();
+  await page.getByText('1 ticket · 3 SP',{exact:true}).waitFor();
+  await page.locator('#profile-ticket-status').selectOption('');
+  await page.getByText('6 tickets · 17 SP',{exact:true}).waitFor();
+  await scan('Member status breakdown');
+  if(process.env.QA_SCREENSHOTS)await page.screenshot({path:path.join(process.env.QA_SCREENSHOTS,'member-status.png'),fullPage:true});
+  await page.locator('#profile-ticket-status').selectOption('Code Review');
+  await page.locator('#profile-person').selectOption('1');
+  await page.waitForFunction(()=>document.querySelector('#profile-ticket-status').value==='');
+  if(await page.locator('#profile-ticket-list [data-ticket="PROFILE-1"]').count())throw Error('Other member tickets leaked into profile');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}

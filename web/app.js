@@ -7,6 +7,7 @@ let today = new Date();
 let activePreset='month';
 let state, page = 'Overview', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
+let profileTicketStatus = '';
 let charts = [], profileId = null, profileYear = today.getFullYear(), profileMonth = today.getMonth(), ticketKey = null;
 let reportData=null,profileData=null,profileRoster=[],renderSequence=0,rankingScope='Individual';
 let pendingImport = null, importResult = null, edit = null, rankMetric = 'score', rankRole = '';
@@ -106,18 +107,33 @@ async function profile(id) {
   if(seq!==renderSequence)return;
   profileRoster=report.members;profileData=report.members.find(m=>m.id===Number(id))||null;
 
+  if(profileId!==Number(id))profileTicketStatus='';
   destroyCharts();profileId=Number(id);ticketKey=null;const m=profileData||state.members.find(m=>m.id===profileId); if(!m)return;
   $('#title').textContent=m.name;$('#subtitle').textContent=`${m.role} · ${teamName(m.team_id)} · ${countryName(m.country)}`;$('#filters').hidden=true;
   const rows=months.map((name,i)=>{const key=`${profileYear}-${String(i+1).padStart(2,'0')}`,future=key>today.toISOString().slice(0,7);return {name,key,future,...metric(m,key)};});
   const hasDevHistory=rows.some(r=>r.target>0);
   const valid=rows.filter(r=>!r.future&&r.eligible),sp=valid.reduce((a,r)=>a+r.sp,0),score=valid.length?valid.reduce((a,r)=>a+r.score,0)/valid.length:null;
-  $('#content').innerHTML=link('← Back to members','data-page="Members"')+`<div class="toolbar"><label>Person<select id="profile-person">${opts((profileRoster.length?profileRoster:state.members).filter(x=>(!country||x.country===country)&&(!team||x.team_id===Number(team))),m.id)}</select></label><label>Year<input type="number" id="profile-year" min="2000" max="${today.getFullYear()}" value="${profileYear}"></label><label>Country<select id="profile-country"><option value="">All countries</option>${opts(state.countries,country,'name','code')}</select></label></div><div class="grid"><div class="panel"><div class="muted">${hasDevHistory?'Delivered SP':'Role'}</div><strong class="value">${hasDevHistory?fmt(sp):m.role}</strong><div class="muted">${profileYear} · Recorded period</div></div><div class="panel"><div class="muted">Average monthly score</div><strong class="value">${fmt(score)}</strong><div class="muted">${valid.length} active months · Finalized records preserved</div></div><div class="panel"><div class="muted">${hasDevHistory?'Period utilization':'Critical rewards'}</div><strong class="value">${hasDevHistory?(profileData?.util===null||profileData?.util===undefined?'N/A':fmt(profileData.util)+'%'):fmt(valid.reduce((a,r)=>a+r.critical,0))}</strong><div class="muted">${hasDevHistory?fmt(profileData?.target)+' SP target through selected year-end / today':'Performance only; no utilization target'}</div></div></div>`+(hasDevHistory?chartBox('year-delivery','Monthly delivery and target')+chartBox('year-util','Monthly utilization (%)'):'')+chartBox('year-score','Monthly performance score','Click a month for its detailed breakdown.')+`<div id="month-detail"></div>`+panel('Monthly records',table(['Month','Done SP','Utilization','Bonus','Deductions','Score'],rows.map((r,i)=>`<tr><td>${link(r.name,`data-month="${i}"`)}</td><td>${r.future?'—':hasDevHistory?fmt(r.sp):'N/A'}</td><td>${r.future?'—':hasDevHistory?fmt(r.util)+'%':'N/A'}</td><td>${r.future?'—':fmt(r.bonus+r.critical)}</td><td>${r.future?'—':fmt(r.penalties)}</td><td>${r.future?'Future':fmt(r.score)+' · '+r.record_status}</td></tr>`)));
+  $('#content').innerHTML=link('← Back to members','data-page="Members"')+`<div class="toolbar"><label>Person<select id="profile-person">${opts((profileRoster.length?profileRoster:state.members).filter(x=>(!country||x.country===country)&&(!team||x.team_id===Number(team))),m.id)}</select></label><label>Year<input type="number" id="profile-year" min="2000" max="${today.getFullYear()}" value="${profileYear}"></label><label>Country<select id="profile-country"><option value="">All countries</option>${opts(state.countries,country,'name','code')}</select></label></div><div id="profile-tickets"></div><div class="grid"><div class="panel"><div class="muted">${hasDevHistory?'Delivered SP':'Role'}</div><strong class="value">${hasDevHistory?fmt(sp):m.role}</strong><div class="muted">${profileYear} · Recorded period</div></div><div class="panel"><div class="muted">Average monthly score</div><strong class="value">${fmt(score)}</strong><div class="muted">${valid.length} active months · Finalized records preserved</div></div><div class="panel"><div class="muted">${hasDevHistory?'Period utilization':'Critical rewards'}</div><strong class="value">${hasDevHistory?(profileData?.util===null||profileData?.util===undefined?'N/A':fmt(profileData.util)+'%'):fmt(valid.reduce((a,r)=>a+r.critical,0))}</strong><div class="muted">${hasDevHistory?fmt(profileData?.target)+' SP target through selected year-end / today':'Performance only; no utilization target'}</div></div></div>`+(hasDevHistory?chartBox('year-delivery','Monthly delivery and target')+chartBox('year-util','Monthly utilization (%)'):'')+chartBox('year-score','Monthly performance score','Click a month for its detailed breakdown.')+`<div id="month-detail"></div>`+panel('Monthly records',table(['Month','Done SP','Utilization','Bonus','Deductions','Score'],rows.map((r,i)=>`<tr><td>${link(r.name,`data-month="${i}"`)}</td><td>${r.future?'—':hasDevHistory?fmt(r.sp):'N/A'}</td><td>${r.future?'—':hasDevHistory?fmt(r.util)+'%':'N/A'}</td><td>${r.future?'—':fmt(r.bonus+r.critical)}</td><td>${r.future?'—':fmt(r.penalties)}</td><td>${r.future?'Future':fmt(r.score)+' · '+r.record_status}</td></tr>`)));
   const pick=i=>{profileMonth=i;monthDetail();},data=key=>rows.map(r=>r.future||!r.eligible?null:r[key]);
   if(hasDevHistory) {
     draw('year-delivery','bar',months,[series('Done SP',data('sp')),{...series('Target SP',rows.map(r=>r.future||!r.eligible?null:r.target),'#cad8d0','line'),borderDash:[5,5]}],'Story points',pick);
     draw('year-util','line',months,[series('Utilization (%)',data('util'),'#66d1a3','line'),{...series('Target (%)',rows.map(r=>r.future||!r.eligible?null:100),'#cad8d0','line'),borderDash:[5,5]}],'Utilization (%)',pick);
   }
-  draw('year-score','line',months,[series('Score',data('score'),'#66d1a3','line'),{...series('Baseline',rows.map(r=>r.future||!r.eligible?null:100),'#cad8d0','line'),borderDash:[5,5]}],'Score points',pick);monthDetail();
+  draw('year-score','line',months,[series('Score',data('score'),'#66d1a3','line'),{...series('Baseline',rows.map(r=>r.future||!r.eligible?null:100),'#cad8d0','line'),borderDash:[5,5]}],'Score points',pick);monthDetail();renderProfileTickets();
+}
+function renderProfileTickets() {
+  const container=$('#profile-tickets');if(!container||profileId===null)return;
+  const tickets=state.tickets.filter(t=>t.member_id===profileId||(t.owners||[]).some(m=>m.id===profileId));
+  const statuses=[...new Set(tickets.map(t=>t.status))].sort((a,b)=>a.localeCompare(b));
+  if(!statuses.includes(profileTicketStatus))profileTicketStatus='';
+  const selected=tickets.filter(t=>!profileTicketStatus||t.status===profileTicketStatus);
+  const points=rows=>rows.reduce((sum,t)=>sum+(Number.isFinite(t.sp)?t.sp:0),0);
+  const missing=selected.filter(t=>!Number.isFinite(t.sp)).length;
+  const summary=table(['Status','Tickets','Story points'],statuses.map(status=>{
+    const rows=tickets.filter(t=>t.status===status);
+    return `<tr><td><button type="button" data-profile-status="${esc(status)}" aria-pressed="${profileTicketStatus===status}">${esc(status)}</button></td><td>${rows.length}</td><td>${fmt(points(rows))}${rows.some(t=>!Number.isFinite(t.sp))?' + unknown':''}</td></tr>`;
+  }));
+  container.innerHTML=panel('Tickets by status',`<p class="muted">Latest observed tickets assigned to this developer or accountable team member, across all dates. The annual charts below use the selected year. Status SP totals are current estimates, separate from completed delivery credit.</p><div class="toolbar"><label>Status<select id="profile-ticket-status"><option value="">All statuses (${tickets.length})</option>${statuses.map(status=>`<option value="${esc(status)}" ${profileTicketStatus===status?'selected':''}>${esc(status)} (${tickets.filter(t=>t.status===status).length})</option>`).join('')}</select></label><span id="profile-ticket-total" class="badge" role="status">${selected.length} ticket${selected.length===1?'':'s'} · ${fmt(points(selected))} SP${missing?` · ${missing} missing estimate(s)`:''}</span></div>`+summary+`<h3>${esc(profileTicketStatus||'All statuses')}</h3><div id="profile-ticket-list">${ticketsTable(selected)}</div>`);
 }
 function monthDetail() {
   const m=state.members.find(m=>m.id===profileId);if(!m)return;const key=`${profileYear}-${String(profileMonth+1).padStart(2,'0')}`,v=metric(m,key);
@@ -162,6 +178,7 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button');i
   }
   if(b.dataset.page){page=b.dataset.page;edit=null;announce('');render();}
   if(b.dataset.admin){page='Administration';adminTab=b.dataset.admin;edit=null;render();}
+  if(b.hasAttribute('data-profile-status')){profileTicketStatus=b.dataset.profileStatus;renderProfileTickets();}
   if(b.dataset.person)profile(Number(b.dataset.person));
   if(b.dataset.ticket)await ticket(b.dataset.ticket);
   if(b.hasAttribute('data-month')){profileMonth=Number(b.dataset.month);monthDetail();}
@@ -181,6 +198,7 @@ document.addEventListener('change',e=>{try {
   }
   if(e.target.id==='team'){team=e.target.value;render();}
   if(e.target.id==='country'){country=e.target.value;render();}
+  if(e.target.id==='profile-ticket-status'){profileTicketStatus=e.target.value;renderProfileTickets();}
   if(e.target.id==='profile-person')profile(Number(e.target.value));
   if(e.target.id==='profile-year'){profileYear=Math.min(today.getFullYear(),Math.max(2000,Number(e.target.value)));profile(profileId);}
   if(e.target.id==='profile-country'){country=e.target.value;const candidates=(profileRoster.length?profileRoster:state.members).filter(m=>(!m.archived||m.id===profileId)&&(!team||m.team_id===Number(team))&&(!country||m.country===country));if(candidates.length)profile(candidates[0].id);else{page='Members';render();}}

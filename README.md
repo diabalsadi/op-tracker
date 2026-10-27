@@ -52,7 +52,7 @@ Unattributable or undated comments remain visible but cannot establish a follow-
 - Historical member assignments and active periods determine period targets. Partial months are prorated using working time.
 - Monthly performance records are calculated separately. Multi-month views average eligible monthly records; selecting part of a month does not create another score baseline.
 - Individual, role and team rankings have separate performance/utilization views. Roles without delivery targets are not assigned utilization values.
-- Annual member profiles include interactive monthly charts, evidence and record status. Months before joining or during inactive periods are excluded.
+- Annual member profiles include interactive monthly charts, evidence and record status. Each profile also lists its latest assigned/accountable tickets across all dates, with counts and current SP totals by status. Select a status or click its summary row to filter the ticket list; click a ticket key to inspect its lifecycle. These status totals are separate from completed delivery credit. Months before joining or during inactive periods are excluded.
 - Delivery reports include observed status durations versus configured allowances. Click a ticket for snapshots, changes, comments, score events and corrections.
 - CSV report exports use the selected filters. Workflow charts show latest observed state and are labeled accordingly.
 
