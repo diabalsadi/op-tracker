@@ -1,34 +1,95 @@
 # OP Tracker
 
-Local CSV tracking application with a SQLite file database and an interactive web interface.
+A local Jira CSV tracker with a SQLite file database and an interactive web interface. No login or external service is required. The database starts empty; no employee records, Jira exports, or personal data are included in the repository.
 
-## Run
+## Start
 
-Requires Python 3.11+.
+Install Python 3.11 or newer, then:
 
 ```bash
 git clone https://github.com/diabalsadi/op-tracker.git
 cd op-tracker
-python server.py
+python -m pip install -r requirements.txt
+python server.py --open
 ```
 
-Open http://127.0.0.1:8765. On Windows, use `py server.py`; install timezone data with `py -m pip install tzdata` if needed.
+On Windows, use `py -3` instead of `python` if needed. After installing dependencies, double-click **start.bat**. On macOS/Linux, use `sh start.sh`. Open **http://127.0.0.1:8765** if your browser does not open automatically. The application binds only to localhost.
 
-Start with Administration to create teams and members, then configure your own workflow rules and calendars. Imports support preview and commit. No employee data or database is included.
+Optional arguments:
 
-## Storage
+```bash
+python server.py --port 9000 --db path/to/tracker.sqlite3
+```
 
-Local data and backups are stored under `data/`, which Git ignores. Back up before changing configuration. Stop the server before restoring a SQLite backup. This is a localhost-only single-user application.
+## Initial setup
 
-## Tests
+1. **Administration → Teams:** create your teams.
+2. **Members:** enter names, exact Jira account IDs, countries, roles and assignments. Set each person's effective joining date correctly before importing historical exports. Changes create effective-dated versions; archiving/reactivating retains inactive periods and prior records.
+3. **Calendars:** choose weekend days and add country holidays, including date ranges. Existing dates can be edited or removed.
+4. **Workflow:** map your Jira statuses to active, paused, completed, cancelled or backlog categories; configure accountable roles and critical-priority names.
+5. **Workflow rules:** define the severity/estimate combinations, durations and deductions your organization chooses. Effective dates preserve earlier rule versions.
+6. **Targets:** review your delivery and follow-up policy. Policy changes have effective dates.
+7. **Sprints:** optionally define reporting periods and team scope.
+8. **Imports:** preview and commit your daily CSV snapshot.
+
+## Daily imports
+
+Ticket keys identify records. A later CSV appends a snapshot and updates current status, ownership and comments. Earlier observations are preserved. Reimporting an identical snapshot is a no-op. Tickets absent from a filtered export are not deleted or completed. Out-of-order imports are ordered chronologically; conflicting ticket values at the same snapshot time are rejected.
+
+The importer accepts UTF-8 or Windows-1252 files, repeated comment columns, common Jira header aliases, and comma/tab/semicolon delimiters. Column overrides and source timezone can be saved as import profiles. Select the CSV's actual timezone for dates without offsets; timestamps with explicit offsets remain authoritative. The snapshot picker uses your browser's local time and converts it to UTC.
+
+Jira comments may contain `timestamp;author;body` text or JSON:
+
+```json
+[{"author":"jira-account-id","at":"2026-10-20T09:00:00Z","body":"Progress update"}]
+```
+
+Unattributable or undated comments remain visible but cannot establish a follow-up deadline. Unmapped assignees and missing estimates appear in import warnings. Use member setup and audited ticket corrections to repair these inputs.
+
+## Reports
+
+- Start/end date pickers combine months, quarters or custom periods. Presets select the current month, quarter or year. Reporting endpoint dates and event grouping use UTC; working-time calculations use country calendars.
+- Historical member assignments and active periods determine period targets. Partial months are prorated using working time.
+- Monthly performance records are calculated separately. Multi-month views average eligible monthly records; selecting part of a month does not create another score baseline.
+- Individual, role and team rankings have separate performance/utilization views. Roles without delivery targets are not assigned utilization values.
+- Annual member profiles include interactive monthly charts, evidence and record status. Months before joining or during inactive periods are excluded.
+- Delivery reports include observed status durations versus configured allowances. Click a ticket for snapshots, changes, comments, score events and corrections.
+- CSV report exports use the selected filters. Workflow charts show latest observed state and are labeled accordingly.
+
+## Monthly history and corrections
+
+Elapsed months are finalized when the app next reads the database. Finalized records preserve delivery credits, daily targets, events and scores. New evidence does not silently replace them: affected months are flagged as needing review. Use **Administration → Monthly records** to create an explicit revision with a reason; earlier versions remain available.
+
+Configuration history is visible in Administration. Ticket corrections and manual-comment revisions retain original source evidence and audit entries. A reopened ticket does not create a second delivery credit.
+
+An export containing aggregate Time in Status data does not establish chronological transitions. The app retains encoded totals and provides status-ID/unit mapping controls. Verify those mappings before interpreting hours. Exact historical transitions or the moment a priority changed cannot be recovered from a current-state-only export; supply trustworthy history or an audited correction instead of guessing.
+
+## Data and backup
+
+`data/tracker.sqlite3` contains configuration, original CSV contents, snapshots, comments, audit history and monthly records. `data/` is excluded from Git. Automatic consistent backups run before imports and important historical operations; the newest 30 are retained in `data/backups/`.
+
+**Administration → Backup & restore** creates backups and restores a listed snapshot after explicit confirmation. Restore validates database integrity and creates a safety backup first. For manual restoration, stop the server, retain a copy of the current database, replace the database file with your chosen backup, and restart.
+
+This is a single-operator localhost application. The separately hosted design prototype uses sample data and is not connected to your database.
+
+## Validation
+
+Run locally; no CI workflow is installed:
 
 ```bash
 python -m unittest discover -s tests -v
 node --check web/app.js
+node --check web/extra.js
 ```
 
-## Initial version
+Optional browser regression check (Node.js required):
 
-Includes CSV snapshots, ticket history, configurable administration, date-range filters and charts. Some reports and historical policy/version controls remain under development. Rule, calendar, target or membership edits can recalculate results; the first version does not provide immutable monthly accounting records. Browser visual layout verification remains pending.
+```bash
+npm install --no-save playwright
+npx playwright install chromium
+node tests/browser_smoke.mjs
+```
 
-Chart.js is vendored with its license header. The app does not require remote services at runtime.
+The browser check starts an isolated temporary database, exercises navigation and administration, uses real Chart.js, and scans desktop/mobile widths. `CHROMIUM_PATH`, `PLAYWRIGHT_MODULE`, `PYTHON`, `TEST_PORT`, and `QA_SCREENSHOTS` optionally select an existing browser/runtime or screenshot directory. Native Windows execution must be checked on a Windows machine; the startup scripts and timezone dependency are provided.
+
+Chart.js is vendored with its license header. Fonts use installed Inter/Montserrat where available and system fallbacks; there are no external font or analytics requests.

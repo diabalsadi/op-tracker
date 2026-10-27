@@ -30,7 +30,7 @@ def timestamp(value):
         dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
     except ValueError:
         dt = None
-        for fmt in ('%d/%b/%y %I:%M %p', '%d/%b/%y %H:%M', '%d/%m/%Y %H:%M', '%Y-%m-%d'):
+        for fmt in ('%d/%b/%y %I:%M %p', '%d/%b/%y %H:%M', '%m/%d/%Y %H:%M', '%d/%m/%Y %H:%M', '%Y-%m-%d'):
             try:
                 dt = datetime.strptime(value, fmt)
                 break
@@ -65,6 +65,8 @@ class Tracker:
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,created_at TEXT NOT NULL,payload TEXT NOT NULL);
         ''')
         with self.db:
+            if 'author_jira' not in {r['name'] for r in self.rows('PRAGMA table_info(manual_comments)')}:
+                self.db.execute('ALTER TABLE manual_comments ADD COLUMN author_jira TEXT')
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('monthly_target','16')")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('followup_days','3')")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('followup_initial','2')")
@@ -81,6 +83,8 @@ class Tracker:
         self.db.execute('INSERT INTO audit(kind,created_at,payload) VALUES(?,?,?)', (kind, now(), json.dumps(value)))
 
     def save(self, kind, data):
+        self._work_cache={}
+        self._day_cache={}
         specs = {
             'teams': ['name'],
             'members': ['name', 'jira_id', 'role', 'qa_slot', 'country', 'team_id'],
@@ -165,7 +169,25 @@ class Tracker:
             'resolved': ['Resolved', 'Resolution date'], 'critical_at': ['Critical At', 'Critical since'],
             'status_at': ['Status Changed At', 'Status changed'],
         }
-        reader = csv.reader(io.StringIO(raw.lstrip('\ufeff')))
+        try:
+            dialect = csv.Sniffer().sniff(raw[:20000], delimiters=',;\t')
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.reader(io.StringIO(raw.lstrip('\ufeff')), dialect)
+        export_timezone = (mapping or {}).get('_timezone','UTC')
+        try:
+            export_tz=ZoneInfo(export_timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError('Invalid CSV timezone or missing timezone data')
+        def parse_time(value):
+            if not value:
+                return None
+            normalized=timestamp(value)
+            # Explicit ISO offsets win; otherwise timestamps belong to the selected export timezone.
+            if re.search(r'(?:Z|[+-]\d\d:\d\d)$',str(value).strip()):
+                return normalized
+            naive=datetime.fromisoformat(normalized).replace(tzinfo=None)
+            return naive.replace(tzinfo=export_tz).astimezone(timezone.utc).isoformat()
         headers = next(reader, [])
         if not headers:
             raise ValueError('CSV has no header')
@@ -176,7 +198,7 @@ class Tracker:
             columns[field] = lookup.get(requested.casefold()) if requested else next((lookup[n.casefold()] for n in names if n.casefold() in lookup), None)
         if columns['key'] is None or columns['status'] is None:
             raise ValueError('Map Issue key and Status columns before import')
-        members = {r['jira_id']: r for r in self.rows('SELECT * FROM members')}
+        members = {r['jira_id']: r for r in (self.members_at(snapshot_at) if hasattr(self, 'members_at') else self.rows('SELECT * FROM members'))}
         results, warnings, seen = [], [], set()
         for number, row in enumerate(reader, 2):
             if not any(row):
@@ -204,15 +226,15 @@ class Tracker:
                         values = json.loads(value)
                         values = values if isinstance(values, list) else [values]
                         for c in values:
-                            comments.append({'author': c.get('author', ''), 'at': timestamp(c.get('at')), 'body': str(c.get('body', ''))})
+                            comments.append({'author': c.get('author', ''), 'at': parse_time(c.get('at')), 'body': str(c.get('body', ''))})
                     except (ValueError, TypeError, AttributeError):
                         parts = value.split(';', 2)
                         try:
-                            comments.append({'at': timestamp(parts[0]), 'author': parts[1], 'body': parts[2]})
+                            comments.append({'at': parse_time(parts[0]), 'author': parts[1], 'body': parts[2]})
                         except (ValueError, IndexError):
                             comments.append({'at': None, 'author': '', 'body': value})
                             warnings.append(f'{key}: comment author/time unavailable; cannot reset follow-up')
-            payload = {'key': key, 'summary': get('summary'), 'status': get('status'), 'severity': get('severity') or 'Unspecified', 'sp': estimate, 'assignee': get('assignee'), 'member_id': member['id'] if member else None, 'team_id': member['team_id'] if member else None, 'resolved': timestamp(get('resolved')), 'critical_at': timestamp(get('critical_at')), 'status_at': timestamp(get('status_at')), 'comments': comments}
+            payload = {'key': key, 'summary': get('summary'), 'status': get('status'), 'severity': get('severity') or 'Unspecified', 'sp': estimate, 'assignee': get('assignee'), 'member_id': member['id'] if member else None, 'team_id': member['team_id'] if member else None, 'resolved': parse_time(get('resolved')), 'critical_at': parse_time(get('critical_at')), 'status_at': parse_time(get('status_at')), 'comments': comments}
             if member and member['role'] != 'Dev':
                 prior = self.rows('SELECT payload FROM observations WHERE ticket_key=? AND observed_at<? ORDER BY observed_at DESC,id DESC LIMIT 1', (key, snapshot_at))
                 prior_id = json.loads(prior[0]['payload']).get('member_id') if prior else None
@@ -222,6 +244,16 @@ class Tracker:
                 if not member:
                     warnings.append(f'{key}: QA/TPM assignee has no previous developer ownership')
             payload['owners'] = [m for m in members.values() if member and (m['id'] == member['id'] or m['team_id'] == member['team_id'] and m['role'] in ('QA', 'TPM'))]
+            payload['sprints'] = [row[i].strip() for i,h in enumerate(headers) if h.strip().casefold()=='sprint' and i<len(row) and row[i].strip()]
+            payload['time_in_status'] = []
+            chart_index = lookup.get('custom field ([chart] time in status)')
+            if chart_index is not None and chart_index < len(row) and row[chart_index].strip():
+                for item in row[chart_index].split('_*|*_'):
+                    parts = item.split('_*:*_')
+                    if len(parts)==3 and parts[1].isdigit() and re.fullmatch(r'\d+(?:\.\d+)?',parts[2]):
+                        payload['time_in_status'].append({'status_id':parts[0],'visits':int(parts[1]),'duration_raw':float(parts[2]),'unit':'unverified'})
+                    else:
+                        warnings.append(f'{key}: unsupported encoded Time in Status entry retained in source CSV')
             for c in comments:
                 if c['at'] and c['at'] > snapshot_at:
                     raise ValueError(f'{key}: comment timestamp is after snapshot')
@@ -262,12 +294,25 @@ class Tracker:
         return dest.name
 
     def working_day(self, country, d):
+        cache=getattr(self,'_day_cache',None)
+        if cache is None:
+            cache=self._day_cache={}
+        key=(country,d)
+        if key in cache:
+            return cache[key]
         c = self.rows('SELECT * FROM countries WHERE code=?', (country,))[0]
-        return d.weekday() not in json.loads(c['weekend']) and not self.rows('SELECT id FROM holidays WHERE country=? AND day=?', (country, d.isoformat()))
+        cache[key]=d.weekday() not in json.loads(c['weekend']) and not bool(self.rows('SELECT id FROM holidays WHERE country=? AND day=?', (country, d.isoformat())))
+        return cache[key]
 
     def work(self, start, end, country):
         if not start or start >= end:
             return 0.0
+        cache=getattr(self,'_work_cache',None)
+        if cache is None:
+            cache=self._work_cache={}
+        key=(start,end,country)
+        if key in cache:
+            return cache[key]
         c = self.rows('SELECT * FROM countries WHERE code=?', (country,))[0]
         try:
             tz = ZoneInfo(c['timezone'])
@@ -281,6 +326,7 @@ class Tracker:
             if self.working_day(country, current):
                 total += max(0, (min(b, high) - max(a, low)).total_seconds()) / 86400
             current += timedelta(days=1)
+        cache[key]=total
         return total
 
     def ticket(self, key):
@@ -292,7 +338,8 @@ class Tracker:
             p = json.loads(o['payload'])
             for field in ('status', 'assignee', 'severity', 'sp'):
                 if previous is None or p[field] != previous[field]:
-                    events.append({'at': o['observed_at'], 'kind': field, 'from': previous.get(field) if previous else None, 'to': p[field], 'evidence': 'snapshot observation', 'import_id': o['import_id']})
+                    exact=field=='status' and p.get('status_at') and p['status_at']<=o['observed_at']
+                    events.append({'at': p['status_at'] if exact else o['observed_at'], 'kind': field, 'from': previous.get(field) if previous else None, 'to': p[field], 'evidence': 'exported status timestamp' if exact else 'snapshot observation', 'import_id': o['import_id']})
             for c in p['comments']:
                 ident = (c['author'], c['at'], c['body'])
                 if ident not in unique:
@@ -301,10 +348,12 @@ class Tracker:
             previous = p
         members = {m['id']: m for m in self.rows('SELECT * FROM members')}
         for c in self.rows('SELECT * FROM manual_comments WHERE ticket_key=?', (key,)):
-            author = members[c['author_id']]['jira_id']
+            if hasattr(self,'effective_comment'):
+                c=self.effective_comment(c)
+            author = c.get('author_jira') or members[c['author_id']]['jira_id']
             ident = (author, c['occurred_at'], c['body'])
             if ident not in unique:
-                comments.append({'author': author, 'at': c['occurred_at'], 'body': c['body'], 'source': 'Manual entry'})
+                comments.append({'author': author, 'at': c['occurred_at'], 'body': c['body'], 'source': 'Manual entry','manual_id':c['id']})
                 unique.add(ident)
         return {'current': previous, 'events': events, 'comments': sorted(comments, key=lambda x: x['at'] or ''), 'observations': [{**o, 'payload': json.loads(o['payload'])} for o in observations]}
 
@@ -318,7 +367,7 @@ class Tracker:
         if not body or not at or at > now():
             raise ValueError('Enter a comment and a valid past timestamp')
         with self.db:
-            self.db.execute('INSERT INTO manual_comments(ticket_key,author_id,body,occurred_at,created_at) VALUES(?,?,?,?,?)', (data['ticket_key'], data['author_id'], body, at, now()))
+            self.db.execute('INSERT INTO manual_comments(ticket_key,author_id,body,occurred_at,created_at,author_jira) VALUES(?,?,?,?,?,?)', (data['ticket_key'], data['author_id'], body, at, now(),member[0]['jira_id']))
             self.audit('manual_comment', data)
 
     def state(self, asof=None):
@@ -333,45 +382,73 @@ class Tracker:
             if not obs:
                 continue
             current = obs[-1]['payload']
-            current['last_seen'] = obs[-1]['observed_at']
+            current['last_seen'] = next(o['observed_at'] for o in reversed(obs) if not o.get('virtual'))
             tickets.append(current)
-            first = next((o for o in obs if o['payload']['status'].casefold() in DONE), None)
+            done = lambda status: self.workflow_at(status)['category']=='done' if hasattr(self,'workflow_at') else status.casefold() in DONE
+            paused = lambda status: self.workflow_at(status)['category']=='paused' if hasattr(self,'workflow_at') else status.casefold() in PAUSED
+            first = next((o for o in obs if done(o['payload']['status'])), None)
             if first:
                 p = first['payload']
                 completed = p['resolved'] or (first['observed_at'] if first != obs[0] else None)
                 historical = p.get('owners', [])
-                dev = next((m for m in historical if m['id'] == p['member_id']), byid.get(p['member_id']))
+                dev = next((m for m in historical if m['id'] == p['member_id']), p.get('developer_snapshot') or byid.get(p['member_id']))
                 if completed and dev and dev['role'] == 'Dev' and p['sp'] is not None:
                     credits.append({'key': key, 'at': completed, 'sp': p['sp'], 'member_id': dev['id'], 'team_id': p['team_id'], 'evidence': 'resolution timestamp' if p['resolved'] else 'first observed Done'})
-                    if p['severity'].casefold() == 'critical' and p['critical_at'] and p['critical_at'] <= completed and self.work(p['critical_at'], completed, dev['country']) <= 2:
+                    critical_dates=[o['payload']['critical_at'] for o in obs if o['payload'].get('critical_at') and o['observed_at']<=first['observed_at']]
+                    critical_at=min(critical_dates) if critical_dates else None
+                    policy=self.policy_at(completed) if hasattr(self,'policy_at') else {}
+                    critical=self.is_critical(p['severity']) if hasattr(self,'is_critical') else p['severity'].casefold()=='critical'
+                    if critical and not critical_at:
+                        warnings.append(f'{key}: Critical reward needs an evidenced marked-Critical timestamp')
+                    if critical and critical_at and critical_at <= completed and self.work(critical_at, completed, dev['country']) <= policy.get('critical_days',2):
                         owners = historical or [m for m in members if m['id'] == dev['id'] or m['team_id'] == p['team_id'] and m['role'] in ('QA', 'TPM')]
-                        score_events.extend({'key': key, 'member_id': m['id'], 'at': completed, 'points': 1, 'reason': 'Critical completed within 2 working days'} for m in owners)
+                        score_events.extend({'key': key, 'member_id': m['id'], 'at': completed, 'points': policy.get('critical_reward',1), 'reason': 'Critical completed within configured working-day window'} for m in owners)
                 else:
                     warnings.append(f'{key}: Done credit needs developer, SP, and evidenced completion time')
             # Status episodes are inferred from consecutive snapshots; exact transition history is not fabricated.
             episodes = []
             for o in obs:
                 p = o['payload']
-                signature = (p['status'], p['member_id'], p['team_id'], p['severity'], p['sp'])
+                signature = (p['status'], p['member_id'], p['team_id'], p['severity'], p['sp'],json.dumps(p.get('owners',[]),sort_keys=True))
                 if not episodes or episodes[-1]['signature'] != signature:
-                    episodes.append({'signature': signature, 'p': p, 'start': o['observed_at']})
+                    exact=p.get('status_at')
+                    valid=exact and exact<=o['observed_at'] and (not episodes or exact>episodes[-1]['start'] and episodes[-1]['p']['status']!=p['status'])
+                    episodes.append({'signature': signature, 'p': p, 'start': exact if valid else o['observed_at']})
             for i, ep in enumerate(episodes):
                 p, start = ep['p'], ep['start']
                 end = episodes[i+1]['start'] if i+1 < len(episodes) else asof
                 historical = p.get('owners', [])
-                dev = next((m for m in historical if m['id'] == p['member_id']), byid.get(p['member_id']))
-                if not dev or dev['role'] != 'Dev' or p['status'].casefold() in DONE | {'cancelled'}:
+                dev = next((m for m in historical if m['id'] == p['member_id']), p.get('developer_snapshot') or byid.get(p['member_id']))
+                category = self.workflow_at(p['status'])['category'] if hasattr(self,'workflow_at') else ('done' if done(p['status']) else 'cancelled' if p['status'].casefold()=='cancelled' else 'active')
+                if not dev or dev['role'] != 'Dev' or category in ('done','cancelled','backlog'):
                     continue
                 owners = [m for m in (historical or members) if m['id'] == dev['id'] or m['team_id'] == p['team_id'] and m['role'] == 'TPM' or m['team_id'] == p['team_id'] and m['role'] == 'QA' and p['status'].casefold() in ('qa', 'ready for release')]
                 if p['status'].casefold() == 'ready for release':
                     owners = [m for m in owners if m['role'] != 'Dev']
-                if p['status'].casefold() in PAUSED:
+                if hasattr(self,'workflow_at'):
+                    allowed = json.loads(self.workflow_at(p['status'])['roles'])
+                    owners = [m for m in (historical or members) if m['role'] in allowed and (m['id']==dev['id'] or m['team_id']==p['team_id'] and m['role']!='Dev')]
+                if paused(p['status']):
+                    if hasattr(self,'followup_history'):
+                        if i and paused(episodes[i-1]['p']['status']):
+                            continue
+                        segments=[];j=i
+                        while j<len(episodes) and paused(episodes[j]['p']['status']):
+                            q=episodes[j]['p'];stop=episodes[j+1]['start'] if j+1<len(episodes) else asof
+                            roster=q.get('owners',[])
+                            active=[m for m in roster if m['id']==q['member_id'] and m['role']=='Dev' or m['team_id']==q['team_id'] and m['role']=='TPM']
+                            segments.append({'start':episodes[j]['start'],'end':stop,'owners':active});j+=1
+                        self.followup_history(key,start,segments[-1]['end'],segments,detail['comments'],score_events)
+                        continue
                     owners = [m for m in owners if m['role'] in ('Dev', 'TPM')]
                     comment_times = sorted({c['at'] for c in detail['comments'] if c['at'] and start < c['at'] <= end and c['author'] in {m['jira_id'] for m in owners}})
                     for a, b in zip([start]+comment_times, comment_times+[end]):
-                        self.followup_events(key, a, b, owners, settings, score_events)
+                        policy = self.policy_at(a) if hasattr(self,'policy_at') else settings
+                        self.followup_events(key, a, b, owners, policy, score_events)
                     continue
                 rules = self.rows('SELECT * FROM rules WHERE lower(status)=lower(?) AND lower(severity)=lower(?) AND sp=?', (p['status'], p['severity'], p['sp']))
+                if hasattr(self,'rules_at'):
+                    rules = self.rules_at(p['status'],p['severity'],p['sp'],end)
                 if not rules:
                     warnings.append(f'{key}: no duration rule for {p["status"]} / {p["severity"]} / {p["sp"]} SP')
                     continue
@@ -381,14 +458,22 @@ class Tracker:
                 for j in range(i-1, -1, -1):
                     previous = episodes[j]
                     previous_status = previous['p']['status'].casefold()
-                    if previous_status in PAUSED:
+                    if paused(previous['p']['status']):
                         pauses.append((previous['start'], episodes[j+1]['start']))
                     elif previous_status != p['status'].casefold():
                         break
                     anchor = previous['start']
-                anchor = max(anchor, rule['created_at'])
-                for m in owners:
-                    self.penalty_events(key, anchor, end, m, rule, score_events, pauses, start)
+                if hasattr(self,'rules_at'):
+                    boundaries=[r['effective_at'] for r in self.rows('SELECT DISTINCT effective_at FROM rule_versions WHERE effective_at>? AND effective_at<? ORDER BY effective_at',(anchor,end))]
+                    for x,y in zip([anchor]+boundaries,boundaries+[end]):
+                        version_rules=self.rules_at(p['status'],p['severity'],p['sp'],x)
+                        for version in version_rules:
+                            for m in owners:
+                                self.penalty_events(key,max(anchor,version['created_at']),y,m,version,score_events,pauses,max(start,x))
+                else:
+                    anchor = max(anchor, rule['created_at'])
+                    for m in owners:
+                        self.penalty_events(key, anchor, end, m, rule, score_events, pauses, start)
         return {'members': members, 'teams': self.rows('SELECT * FROM teams ORDER BY name'), 'countries': self.rows('SELECT * FROM countries'), 'holidays': self.rows('SELECT * FROM holidays ORDER BY day'), 'rules': self.rows('SELECT * FROM rules'), 'settings': settings, 'tickets': tickets, 'credits': credits, 'score_events': score_events, 'warnings': sorted(set(warnings)), 'imports': self.rows('SELECT id,filename,snapshot_at,created_at FROM imports ORDER BY snapshot_at DESC,id DESC'), 'asof': asof, 'calculation_note': 'Live projections assume the last observed status continues. Exact transitions between exports are unknown.'}
 
     def penalty_events(self, key, start, end, member, rule, events, pauses=None, effective_start=None):

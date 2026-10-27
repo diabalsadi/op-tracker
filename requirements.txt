@@ -1,0 +1,2 @@
+# Provides IANA timezone data on Windows and minimal operating systems.
+tzdata
