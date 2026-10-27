@@ -8,12 +8,13 @@ let activePreset='month';
 let adminMemberFilters={query:'',role:'',team:'',country:''};
 let state, page = 'Overview', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
+let peopleSearch='',peoplePosition='';
 let profileTicketStatus = '';
 let charts = [], profileId = null, profileYear = today.getFullYear(), profileMonth = today.getMonth(), ticketKey = null;
 let stateDirty=false;
 const reportCache=new Map();
 let reportData=null,profileData=null,profileRoster=[],renderSequence=0,rankingScope='Individual';
-let pendingImport = null, importResult = null, edit = null, rankMetric = 'score', rankRole = '';
+let pendingImport = null, importResult = null, edit = null, rankMetric = 'score';
 const countryName = code => state.countries.find(c => c.code === code)?.name || code;
 const teamName = id => state.teams.find(t => t.id === Number(id))?.name || 'Unmapped';
 const memberAssignments = m => {const raw=typeof m.team_assignments==='string'?JSON.parse(m.team_assignments):m.team_assignments;return raw||[{team_id:m.team_id,qa_slot:m.qa_slot}];};
@@ -115,12 +116,7 @@ async function render() {
     content.innerHTML=stats+chartBox('util-chart',page==='Delivery'?'Completed story points by developer':'Developer utilization vs 100% target','Click a bar to inspect the developer’s yearly history.')+panel('Developer records',memberTable(dev));
     const utilization=page==='Utilization';draw('util-chart','bar',dev.map(m=>m.name),[series(utilization?'Utilization (%)':'Done SP',dev.map(m=>utilization?metric(m).util:metric(m).sp)),{...series('Target',dev.map(m=>utilization?100:rangeTarget(m)),'#cad8d0','line'),borderDash:[5,5]}],utilization?'Utilization (%)':'Story points',i=>profile(dev[i].id),'Developer');
   }
-  if(page==='Performance'||page==='Rankings') {
-    let rows=ms;
-    if(page==='Rankings')rows=rows.filter(m=>(!rankRole||m.role===rankRole)&&(rankMetric==='score'||m.role==='Dev')).sort((a,b)=>metric(b)[rankMetric]-metric(a)[rankMetric]);
-    content.innerHTML=(page==='Rankings'?`<div class="toolbar"><label>Rank by<select id="rank-metric"><option value="score" ${rankMetric==='score'?'selected':''}>Performance score</option><option value="util" ${rankMetric==='util'?'selected':''}>Developer utilization</option></select></label><label>Role<select id="rank-role"><option value="">All roles</option>${choices(['Dev','QA','TPM'],rankRole)}</select></label></div>`:stats)+chartBox('score-chart','Member comparison','Click a bar to open the annual person dashboard.')+panel('Monthly performance',memberTable(rows));
-    draw('score-chart','bar',rows.map(m=>m.name),[series(page==='Rankings'&&rankMetric==='util'?'Utilization (%)':'Score',rows.map(m=>metric(m)[page==='Rankings'?rankMetric:'score']))],page==='Rankings'&&rankMetric==='util'?'Utilization (%)':'Score points',i=>profile(rows[i].id),'Member');
-  }
+  if(page==='Performance')renderPerformance();
   if(page==='Members')content.innerHTML=panel('Team members',memberTable(ms))+`<button class="primary" data-admin="Members">Manage members & assignments</button>`;
   if(page==='Tickets')content.innerHTML=panel('Ticket explorer',ticketsTable(ts));
   if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));
@@ -128,6 +124,27 @@ async function render() {
   if(page==='Imports')renderImport();
   if(page==='Administration'){renderAdmin();appendAdminHistory();}
 }
+function filteredPeople(rows) {
+  const query=peopleSearch.trim().normalize('NFKC').toLocaleLowerCase();
+  return rows.filter(m=>(!peoplePosition||m.role===peoplePosition)&&(!query||[m.name,m.jira_id].some(value=>String(value||'').normalize('NFKC').toLocaleLowerCase().includes(query))));
+}
+function peopleFilterControls() {
+  return `<div class="toolbar" aria-label="People filters"><label>Search name or Jira ID<input id="people-search" type="search" value="${esc(peopleSearch)}" placeholder="Search people…"></label><label>Position<select id="people-position"><option value="">All positions</option>${[{id:'Dev',name:'Developer'},{id:'QA',name:'QA'},{id:'TPM',name:'TPM'}].map(r=>`<option value="${r.id}" ${peoplePosition===r.id?'selected':''}>${r.name}</option>`).join('')}</select></label><span class="muted">Combine with the Team and Country filters above.</span><button type="button" id="clear-people-filters">Clear search & position</button></div>`;
+}
+function renderPerformance() {
+  $('#content').innerHTML=peopleFilterControls()+`<div id="performance-results"></div>`;
+  updatePerformance();
+}
+function updatePerformance() {
+  const rows=filteredPeople(getMembers()),dev=rows.filter(m=>m.target>0);
+  const total=key=>dev.reduce((sum,m)=>sum+(m[key]||0),0),scores=rows.filter(m=>m.score!==null);
+  const target=total('target'),sp=total('sp'),score=scores.length?scores.reduce((sum,m)=>sum+m.score,0)/scores.length:null;
+  destroyCharts();
+  $('#performance-results').innerHTML=`<p class="muted" role="status">${rows.length} people match your filters</p><div class="grid">${[['Delivered SP',fmt(sp)],['Dev utilization',target?fmt(sp/target*100)+'%':'N/A'],['Average score',fmt(score)]].map(([label,value])=>`<div class="panel"><div class="muted">${label}</div><strong class="value">${value}</strong></div>`).join('')}</div>`+chartBox('score-chart','Member comparison','Click a bar to open the annual person dashboard.')+panel('Monthly performance',memberTable(rows));
+  draw('score-chart','bar',rows.map(m=>m.name),[series('Score',rows.map(m=>m.score))],'Score points',i=>profile(rows[i].id),'Member');
+}
+function updatePeopleFilters(){if(page==='Performance')updatePerformance();if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));}
+document.addEventListener('input',e=>{if(e.target.id==='people-search'){peopleSearch=e.target.value;updatePeopleFilters();}});
 async function profile(id) {
   const seq=++renderSequence;
   const end=profileYear===today.getFullYear()?today.toISOString().slice(0,10):`${profileYear}-12-31`;
@@ -231,6 +248,7 @@ function renderAdmin() {
 function object(form){const d=Object.fromEntries(new FormData(form));if(d.id==='')delete d.id;return d;}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try {
   if(b.id==='recalculate'){const person=profileId,ticketId=ticketKey;b.disabled=true;announce('Recalculating live results…');state=await api('recalculate',{});stateDirty=false;updateDataStatus();if(person!==null)await profile(person);else if(ticketId)await ticket(ticketId);else if(page==='Administration')renderAdminMemberDirectory();else await render();announce('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.');b.disabled=false;}
+  if(b.id==='clear-people-filters'){peopleSearch='';peoplePosition='';$('#people-search').value='';$('#people-position').value='';updatePeopleFilters();}
   if(b.id==='clear-admin-member-filters'){adminMemberFilters={query:'',role:'',team:'',country:''};for(const id of ['search','role','team','country'])$('#admin-member-'+id).value='';renderAdminMemberDirectory();}
   if(b.dataset.range){
     activePreset=b.dataset.range;
@@ -267,8 +285,8 @@ document.addEventListener('change',e=>{try {
   if(e.target.id==='profile-year'){profileYear=Math.min(today.getFullYear(),Math.max(2000,Number(e.target.value)));profile(profileId);}
   if(e.target.id==='profile-country'){country=e.target.value;const candidates=(profileRoster.length?profileRoster:state.members).filter(m=>(!m.archived||m.id===profileId)&&(!team||memberInTeam(m,team))&&(!country||m.country===country));if(candidates.length)profile(candidates[0].id);else{page='Members';render();}}
   if(e.target.id==='profile-month'){profileMonth=Number(e.target.value);monthDetail();}
-  if(e.target.id==='rank-metric'){rankMetric=e.target.value;render();}
-  if(e.target.id==='rank-role'){rankRole=e.target.value;render();}
+  if(e.target.id==='rank-metric'){rankMetric=e.target.value;updatePeopleFilters();}
+  if(e.target.id==='people-position'){peoplePosition=e.target.value;updatePeopleFilters();}
 }catch(error){announce(error.message,true);}});
 document.addEventListener('submit',async e=>{e.preventDefault();const form=e.target;const button=form.querySelector('button[type=submit],button:not([type])');if(button)button.disabled=true;try {
   const d=object(form);let resource;
