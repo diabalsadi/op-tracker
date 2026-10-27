@@ -135,12 +135,29 @@ function renderPerformance() {
   $('#content').innerHTML=peopleFilterControls()+`<div id="performance-results"></div>`;
   updatePerformance();
 }
+function performanceReview(rows) {
+  const tickets=new Map(),people=[];
+  for(const m of rows){
+    const events=m.review_events||[],deductions=events.reduce((sum,e)=>sum-e.points,0),reasons=[];
+    if(m.score!==null&&m.score<100)reasons.push(`Score ${fmt(m.score)} (below 100)`);
+    if(m.target>0&&m.util!==null&&m.util<100)reasons.push(`Delivery ${fmt(m.util)}% of ${fmt(m.target)} SP target`);
+    if(deductions>0)reasons.push(`${fmt(deductions)} deduction points`);
+    if(reasons.length)people.push({m,deductions,reasons});
+    for(const e of events){
+      if(!tickets.has(e.key))tickets.set(e.key,{key:e.key,points:0,people:new Map(),reasons:new Set(),last:e.at});
+      const t=tickets.get(e.key);t.points-=e.points;t.people.set(m.id,m.name);t.reasons.add(e.reason);if(e.at>t.last)t.last=e.at;
+    }
+  }
+  people.sort((a,b)=>(a.m.score??100)-(b.m.score??100)||b.deductions-a.deductions||a.m.name.localeCompare(b.m.name));
+  const flagged=[...tickets.values()].sort((a,b)=>b.points-a.points||a.key.localeCompare(b.key));
+  return panel('People to look into',`<p class="muted">Review prompts: score below 100, developer delivery below the selected period’s target, or recorded deductions. Uses your search, position, team, country and date filters. Scores retain the monthly calculation shown above.</p><div id="review-people">${people.length?table(['Person','Position','Why review'],people.map(({m,reasons})=>`<tr><td>${link(m.name,`data-person="${m.id}"`)}</td><td>${esc(m.role)}</td><td>${reasons.map(esc).join(' · ')}</td></tr>`)):'<p class="muted">No people meet these review criteria.</p>'}</div>`)+panel('Tickets to look into',`<p class="muted">Tickets with deductions recorded during the selected dates, highest total first. Totals include each accountable person; finalized records are preserved. Click a ticket to inspect its timeline and deductions.</p><div id="review-tickets">${flagged.length?table(['Ticket','Deduction points','People affected','Reason','Latest deduction'],flagged.map(t=>`<tr><td>${link(t.key,`data-ticket="${esc(t.key)}"`)}</td><td>${fmt(t.points)}</td><td>${[...t.people.values()].map(esc).join(', ')}</td><td>${[...t.reasons].map(esc).join(' · ')}</td><td>${dateLabel(t.last)}</td></tr>`)):'<p class="muted">No ticket deductions recorded for these filters.</p>'}</div>`);
+}
 function updatePerformance() {
   const rows=filteredPeople(getMembers()),dev=rows.filter(m=>m.target>0);
   const total=key=>dev.reduce((sum,m)=>sum+(m[key]||0),0),scores=rows.filter(m=>m.score!==null);
   const target=total('target'),sp=total('sp'),score=scores.length?scores.reduce((sum,m)=>sum+m.score,0)/scores.length:null;
   destroyCharts();
-  $('#performance-results').innerHTML=`<p class="muted" role="status">${rows.length} people match your filters</p><div class="grid">${[['Delivered SP',fmt(sp)],['Dev utilization',target?fmt(sp/target*100)+'%':'N/A'],['Average score',fmt(score)]].map(([label,value])=>`<div class="panel"><div class="muted">${label}</div><strong class="value">${value}</strong></div>`).join('')}</div>`+chartBox('score-chart','Member comparison','Click a bar to open the annual person dashboard.')+panel('Monthly performance',memberTable(rows));
+  $('#performance-results').innerHTML=`<p class="muted" role="status">${rows.length} people match your filters</p><div class="grid">${[['Delivered SP',fmt(sp)],['Dev utilization',target?fmt(sp/target*100)+'%':'N/A'],['Average score',fmt(score)]].map(([label,value])=>`<div class="panel"><div class="muted">${label}</div><strong class="value">${value}</strong></div>`).join('')}</div>`+chartBox('score-chart','Member comparison','Click a bar to open the annual person dashboard.')+panel('Monthly performance',memberTable(rows))+performanceReview(rows);
   draw('score-chart','bar',rows.map(m=>m.name),[series('Score',rows.map(m=>m.score))],'Score points',i=>profile(rows[i].id),'Member');
 }
 function updatePeopleFilters(){if(page==='Performance')updatePerformance();if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));}

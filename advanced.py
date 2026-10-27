@@ -775,8 +775,20 @@ class Tracker(BaseTracker):
                         target+=self.target(member['id'],max(start,month_start),min(end,month_next),team_id,country)
             points=sum(c['sp'] for c in credits)
             last=segments[-1][2]
+            review_events=[]
+            for v in monthly:
+                for event in v['events']:
+                    if event['points']>=0 or not start<=event['at']<end or not any(x<=event['at']<y for x,y,m in segments):
+                        continue
+                    if team_id:
+                        observations=self.ticket(event['key'])['observations']
+                        observed=next((o for o in reversed(observations) if o['observed_at']<=event['at']), observations[0] if observations else None)
+                        if not observed or observed['payload']['team_id']!=int(team_id):
+                            continue
+                    review_events.append(event)
             rows.append({**last,'id':member['id'],'sp':points,'target':target,'util':points/target*100 if target>0 else None,
-                         'score':sum(v['score'] for v in monthly)/len(monthly) if monthly else None,'months':monthly})
+                         'score':sum(v['score'] for v in monthly)/len(monthly) if monthly else None,'months':monthly,
+                         'review_events':review_events})
         return {'start_date':start_date,'end_date':end_date,'members':rows,'months':months,
                 'sp':sum(r['sp'] for r in rows),'target':sum(r['target'] for r in rows),
                 'score':sum(r['score'] for r in rows if r['score'] is not None)/sum(r['score'] is not None for r in rows) if any(r['score'] is not None for r in rows) else None}

@@ -21,6 +21,20 @@ class HistoricalTests(unittest.TestCase):
     def tearDown(self):
         self.t.db.close();self.folder.cleanup()
 
+    def test_performance_review_events_follow_dates_team_and_finalized_records(self):
+        self.t.save('rules', dict(status='In Progress',severity='High',sp=5,days=1,initial=2,daily=1,effective_at='2026-07-01T00:00:00Z'))
+        self.t.import_csv(export(), 'start.csv', '2026-08-03T00:00:00Z')
+        self.t.import_csv(export('Done', resolved='2026-08-07T00:00:00Z'), 'done.csv', '2026-08-07T00:00:00Z')
+        report=self.t.report('2026-08-01','2026-08-31',self.a)
+        events=report['members'][0]['review_events']
+        self.assertTrue(events)
+        self.assertTrue(all(e['points']<0 and e['key']=='OP-1' for e in events))
+        self.assertEqual(self.t.report('2026-08-01','2026-08-03',self.a)['members'][0]['review_events'],[])
+        self.assertEqual(self.t.report('2026-08-01','2026-08-31',self.b)['members'],[])
+        self.t.finalize(dict(month='2026-08',reason='Close test month'))
+        frozen=self.t.report('2026-08-01','2026-08-31',self.a)['members'][0]['review_events']
+        self.assertEqual(frozen,events)
+
     def test_membership_prorates_transfer_and_quarter(self):
         q=self.t.report('2026-07-01','2026-09-30')
         self.assertAlmostEqual(q['target'],48)

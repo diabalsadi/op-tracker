@@ -303,6 +303,11 @@ try {
   await page.waitForFunction(()=>document.querySelector('#ranking-results h2')?.textContent==='Role ranking');
   if(await page.locator('#ranking-results tbody tr').count()!==1)throw Error('Position filter was ignored by role rankings');
   await scan('Ranking search and position/team filters');
+  await page.locator('nav button[data-page="Performance"]').click();
+  await page.locator('#review-people').waitFor();await page.locator('#review-tickets').waitFor();
+  await page.locator('#people-search').fill('no matching person');
+  await page.getByText('No people meet these review criteria.',{exact:true}).waitFor();
+  await page.getByText('No ticket deductions recorded for these filters.',{exact:true}).waitFor();
   await page.locator('#clear-people-filters').click();
   await page.locator('#team').selectOption('');await page.locator('#country').selectOption('');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
