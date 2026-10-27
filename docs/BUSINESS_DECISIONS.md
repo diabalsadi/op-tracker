@@ -39,3 +39,9 @@ This file records confirmed choices made after the initial requirements question
 - Repository: https://github.com/diabalsadi/op-tracker
 - CI workflows are not wanted; run tests locally.
 - Maintain an honest distinction between implemented features, verified behavior and source/platform limitations.
+
+## Shared QA and TPM assignments
+
+- Confirmed on 27 October 2026: the same QA or TPM member may be assigned to multiple teams through a Teams multi-select in member administration.
+- A QA member can be Primary in one team and Secondary in another. Each team retains one TPM and one member in each QA slot.
+- Developers retain one team at a time. Assignments remain effective-dated, and a shared member has one identity and one monthly performance record rather than duplicate person records.

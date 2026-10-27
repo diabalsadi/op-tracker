@@ -9,7 +9,7 @@ import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from tracker import Tracker as BaseTracker, now, timestamp
+from tracker import Tracker as BaseTracker, now, timestamp, assignments, in_team, team_owners
 
 
 class Tracker(BaseTracker):
@@ -41,6 +41,8 @@ class Tracker(BaseTracker):
             self.db.execute('DROP INDEX IF EXISTS one_qa_slot')
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_tpm ON members(team_id) WHERE role='TPM' AND archived=0")
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_qa ON members(team_id,qa_slot) WHERE role='QA' AND archived=0")
+            if 'team_assignments' not in {r['name'] for r in self.rows('PRAGMA table_info(members)')}:
+                self.db.execute('ALTER TABLE members ADD COLUMN team_assignments TEXT')
             for m in self.rows('SELECT * FROM members'):
                 if not self.rows('SELECT id FROM member_versions WHERE member_id=?', (m['id'],)):
                     self.db.execute('INSERT INTO member_versions(member_id,effective_at,payload) VALUES(?,?,?)', (m['id'], '1900-01-01T00:00:00+00:00', json.dumps(m)))
@@ -102,6 +104,31 @@ class Tracker(BaseTracker):
             result[m['id']] = m
         return [m for m in result.values() if not m.get('archived')]
 
+    def validate_assignments(self, member, effective):
+        selected=assignments(member)
+        if member['role']=='Dev' and len(selected)!=1:
+            raise ValueError('Developers must have exactly one team; QA and TPM may have multiple teams')
+        seen=set()
+        for assignment in selected:
+            team_id=assignment['team_id']
+            if team_id in seen:
+                raise ValueError('Choose each team only once')
+            seen.add(team_id)
+            team=self.rows('SELECT archived FROM teams WHERE id=?',(team_id,))
+            if not team or team[0]['archived']:
+                raise ValueError('Choose active teams for every assignment')
+            if member['role']=='QA' and assignment.get('qa_slot') not in ('Primary','Secondary'):
+                raise ValueError('Choose a QA position for each team')
+            # Check both the effective date and later/current membership versions.
+            times=[effective]+[r['effective_at'] for r in self.rows('SELECT DISTINCT effective_at FROM member_versions WHERE effective_at>?',(effective,))]
+            for at in times:
+                for other in self.members_at(at):
+                    if other['id']==member.get('id') or other['role']!=member['role']:
+                        continue
+                    for existing in assignments(other):
+                        if existing['team_id']==team_id and (member['role']=='TPM' or member['role']=='QA' and existing.get('qa_slot')==assignment.get('qa_slot')):
+                            raise ValueError('That team role is occupied during the selected assignment period')
+
     def workflow_at(self, status):
         rows = self.rows('SELECT * FROM workflow WHERE lower(name)=lower(?)', (status,))
         return rows[0] if rows else {'name': status, 'category': 'unconfigured', 'roles': '[]'}
@@ -145,14 +172,18 @@ class Tracker(BaseTracker):
                 raise ValueError('Effective time must be after the previous version. Use ticket corrections for evidence repairs.')
         if effective > now():
             raise ValueError('Future-dated configuration is not supported; save when it becomes effective')
-        if kind == 'members' and data.get('team_id'):
-            team = self.rows('SELECT archived FROM teams WHERE id=?', (data['team_id'],))
-            if not team or team[0]['archived']:
-                raise ValueError('Choose an active team')
-            # Revalidate role slots at the effective date, not only against current members.
-            for m in self.members_at(effective):
-                if m['id'] != int(identity or 0) and m['team_id'] == int(data['team_id']) and m['role'] == data['role'] and (m['role'] == 'TPM' or m['role'] == 'QA' and m['qa_slot'] == data.get('qa_slot')):
-                    raise ValueError('That team role is occupied at the selected effective date')
+        if kind == 'members':
+            data=dict(data)
+            raw=data.get('team_assignments')
+            if raw is not None:
+                if not isinstance(raw,list) or not raw or any(not isinstance(item,dict) for item in raw):
+                    raise ValueError('Choose at least one team assignment')
+                selected=[{'team_id':int(item['team_id']),'qa_slot':item.get('qa_slot') if data['role']=='QA' else None} for item in raw]
+                data['team_id']=selected[0]['team_id'];data['qa_slot']=selected[0]['qa_slot']
+            else:
+                selected=[{'team_id':int(data['team_id']),'qa_slot':data.get('qa_slot') if data['role']=='QA' else None}]
+            self.validate_assignments({'id':int(identity) if identity else None,'role':data['role'],
+                'team_id':data['team_id'],'qa_slot':data.get('qa_slot'),'team_assignments':selected},effective)
         if kind=='rules':
             duplicates=self.rows('SELECT id FROM rules WHERE lower(status)=lower(?) AND lower(severity)=lower(?) AND sp=?',(data['status'],data['severity'],float(data['sp'])))
             if any(r['id']!=int(identity or 0) for r in duplicates):
@@ -160,7 +191,9 @@ class Tracker(BaseTracker):
         result = super().save(kind, data)
         with self.db:
             if kind == 'members':
+                self.db.execute('UPDATE members SET team_assignments=? WHERE id=?',(json.dumps(selected),result))
                 member = self.rows('SELECT * FROM members WHERE id=?', (result,))[0]
+                member['team_assignments']=selected
                 if identity:
                     archived = int(data.get('archived', member['archived']))
                     self.db.execute('UPDATE members SET archived=? WHERE id=?', (archived, result))
@@ -269,15 +302,15 @@ class Tracker(BaseTracker):
         record = self.rows(f'SELECT * FROM {resource} WHERE id=?',(int(data['id']),))
         if not record:
             raise ValueError('Record not found')
-        if resource == 'teams' and archived and self.rows('SELECT id FROM members WHERE team_id=? AND archived=0',(data['id'],)):
+        if resource == 'teams' and archived and any(in_team(m,data['id']) for m in self.rows('SELECT * FROM members WHERE archived=0')):
             raise ValueError('Move or archive the active members before archiving this team')
         if resource == 'members':
             effective=timestamp(data.get('effective_at') or now())
             last=self.rows('SELECT effective_at FROM member_versions WHERE member_id=? ORDER BY effective_at DESC LIMIT 1',(data['id'],))[0]['effective_at']
             if effective <= last or effective > now():
                 raise ValueError('Archive time must follow the last version and not be in the future')
-            if not archived and self.rows('SELECT archived FROM teams WHERE id=?',(record[0]['team_id'],))[0]['archived']:
-                raise ValueError('Reactivate the member’s team first')
+            if not archived:
+                self.validate_assignments(record[0],effective)
         self.backup()
         with self.db:
             self.db.execute(f'UPDATE {resource} SET archived=? WHERE id=?',(int(archived),data['id']))
@@ -322,7 +355,7 @@ class Tracker(BaseTracker):
                 raise ValueError('Choose a developer active at the correction time')
             patch['member_id']=dev['id']
             patch['team_id']=dev['team_id']
-            patch['owners']=[m for m in owners if m['id']==dev['id'] or m['team_id']==dev['team_id'] and m['role'] in ('QA','TPM')]
+            patch['owners']=team_owners(owners,dev)
         self.backup()
         with self.db:
             self.db.execute('INSERT INTO corrections(ticket_key,effective_at,patch,reason,created_at) VALUES(?,?,?,?,?)',(data['ticket_key'],effective,json.dumps(patch),reason,now()))
@@ -376,7 +409,7 @@ class Tracker(BaseTracker):
             p['team_id']=dev['team_id'] if dev else last.get('team_id')
             p['member_id']=dev['id'] if dev else last.get('member_id')
             p['developer_snapshot']=dev or last.get('developer_snapshot') or next((m for m in last.get('owners',[]) if m['id']==last.get('member_id')),None)
-            p['owners']=[m for m in roster if (dev and m['id']==dev['id']) or m['team_id']==p['team_id'] and m['role'] in ('QA','TPM')]
+            p['owners']=team_owners(roster,dev or {'id':p['member_id'],'team_id':p['team_id']})
             if p['owners']!=last.get('owners',[]) or p['member_id']!=last.get('member_id'):
                 enriched.append({'id':-len(enriched),'ticket_key':key,'import_id':None,'observed_at':at,'payload':p,'virtual':True})
                 result['events'].append({'at':at,'kind':'ownership/calendar','from':last.get('team_id'),'to':{'team_id':p['team_id'],'owners':[{'name':m['name'],'role':m['role'],'country':m['country']} for m in p['owners']]},'evidence':'Effective-dated local member/team configuration'})
@@ -432,6 +465,8 @@ class Tracker(BaseTracker):
 
     def state(self,asof=None):
         result=super().state(asof)
+        for member in result['members']:
+            member['team_assignments']=assignments(member)
         result.update({'membership_history':self.rows('SELECT * FROM member_versions ORDER BY effective_at,id'),
                        'policy_history':self.rows('SELECT * FROM policy_versions ORDER BY effective_at,id'),
                        'rule_history':self.rows('SELECT * FROM rule_versions ORDER BY effective_at,id'),
@@ -447,7 +482,7 @@ class Tracker(BaseTracker):
         for team in result['teams']:
             if team.get('archived'):
                 continue
-            roster=[m for m in result['members'] if m['team_id']==team['id'] and not m.get('archived')]
+            roster=[{**m,'qa_slot':a.get('qa_slot')} for m in result['members'] if not m.get('archived') for a in assignments(m) if a['team_id']==team['id']]
             missing=[]
             if not any(m['role']=='TPM' for m in roster):
                 missing.append('TPM')
@@ -541,7 +576,7 @@ class Tracker(BaseTracker):
     def target(self,member_id,start,end,team_id=None,country=None,role='Dev'):
         total=0.0
         for a,b,m in self._history_segments(member_id,start,end):
-            if m['role']!=role or team_id and m['team_id']!=int(team_id) or country and m['country']!=country:
+            if m['role']!=role or team_id and not in_team(m,team_id) or country and m['country']!=country:
                 continue
             policies=[r['effective_at'] for r in self.rows('SELECT effective_at FROM policy_versions WHERE effective_at>? AND effective_at<? ORDER BY effective_at',(a,b))]
             for x,y in zip([a]+policies,policies+[b]):
@@ -640,7 +675,7 @@ class Tracker(BaseTracker):
                 else:
                     v=self.monthly(member['id'],month,state);v['record_status']='Provisional' if month==date.today().isoformat()[:7] else 'Unfinalized'
                 matching=[(max(x,start),min(y,end),m) for x,y,m in v['membership_segments']
-                          if x<end and y>start and (not team_id or m['team_id']==int(team_id))
+                          if x<end and y>start and (not team_id or in_team(m,team_id))
                           and (not country or m['country']==country) and (not role or m['role']==role)]
                 if v['eligible'] and matching:
                     monthly.append(v)
@@ -668,8 +703,8 @@ class Tracker(BaseTracker):
     def export(self,data):
         report=self.report(data['start_date'],data['end_date'],data.get('team_id'),data.get('country'),data.get('role'))
         stream=io.StringIO();writer=csv.writer(stream)
-        writer.writerow(['Member','Jira ID','Role','Team ID','Country','Delivered SP','Target SP','Utilization %','Average score','Start','End'])
+        writer.writerow(['Member','Jira ID','Role','Team IDs','Country','Delivered SP','Target SP','Utilization %','Average score','Start','End'])
         for r in report['members']:
-            cells=[r['name'],r['jira_id'],r['role'],r['team_id'],r['country'],r['sp'],r['target'],r['util'],r['score'],report['start_date'],report['end_date']]
+            cells=[r['name'],r['jira_id'],r['role'],';'.join(str(a['team_id']) for a in assignments(r)),r['country'],r['sp'],r['target'],r['util'],r['score'],report['start_date'],report['end_date']]
             writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@')) else v for v in cells])
         return {'filename':f'op-tracker-{report["start_date"]}-{report["end_date"]}.csv','csv':stream.getvalue()}

@@ -382,5 +382,106 @@ class HistoricalTests(unittest.TestCase):
         finally:
             reopened.db.close()
 
+    def shared_member(self, role='TPM', effective='2026-07-01'):
+        return self.t.save('members',{'name':'Shared '+role,'jira_id':'shared-'+role,'role':role,'country':'JO',
+            'effective_at':effective,'team_assignments':[{'team_id':self.a,'qa_slot':'Primary' if role=='QA' else None},
+                {'team_id':self.b,'qa_slot':'Secondary' if role=='QA' else None}]})
+
+    def test_shared_tpm_and_qa_own_tickets_in_both_teams(self):
+        tpm=self.shared_member();qa=self.shared_member('QA')
+        self.t.save('members',{'name':'Dev B','jira_id':'dev-b','role':'Dev','country':'JO','team_id':self.b,'effective_at':'2026-07-01'})
+        self.t.save('rules',{'status':'QA','severity':'High','sp':5,'days':1,'initial':2,'daily':1,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('QA'),'a.csv','2026-08-02T09:00:00Z')
+        self.t.import_csv(export('QA',assignee='dev-b').replace('OP-1','OP-2'),'b.csv','2026-08-02T09:00:00Z')
+        for key,team,slot in [('OP-1',self.a,'Primary'),('OP-2',self.b,'Secondary')]:
+            owners=self.t.ticket(key)['current']['owners']
+            self.assertEqual(sum(m['id']==tpm for m in owners),1)
+            self.assertEqual(sum(m['id']==qa for m in owners),1)
+            self.assertEqual(next(m for m in owners if m['id']==qa)['qa_slot'],slot)
+            self.assertTrue(all(m['team_id']==team for m in owners))
+        events=self.t.state('2026-08-03T10:00:00Z')['score_events']
+        self.assertEqual(len([e for e in events if e['member_id']==tpm]),2)
+        self.assertEqual(len([e for e in events if e['member_id']==qa]),2)
+        self.assertEqual(len({(e['key'],e['member_id'],e['at']) for e in events}),len(events))
+
+    def test_shared_members_filter_into_each_team_without_global_duplicates(self):
+        tpm=self.shared_member();qa=self.shared_member('QA')
+        all_rows=self.t.report('2026-08-01','2026-08-31')['members']
+        self.assertEqual(len([m for m in all_rows if m['id']==tpm]),1)
+        self.assertEqual(len([m for m in all_rows if m['id']==qa]),1)
+        for team in [self.a,self.b]:
+            report=self.t.report('2026-08-01','2026-08-31',team)
+            for identity in [tpm,qa]:
+                member=next(m for m in report['members'] if m['id']==identity)
+                self.assertEqual(member['target'],0)
+                self.assertIsNone(member['util'])
+        self.assertAlmostEqual(self.t.report('2026-08-01','2026-08-31')['target'],16)
+
+    def test_secondary_team_slots_prevent_conflicts_and_unsafe_archive(self):
+        self.shared_member();qa=self.shared_member('QA')
+        with self.assertRaises(ValueError):
+            self.t.save('members',{'name':'Other TPM','jira_id':'other-tpm','role':'TPM','country':'JO','team_id':self.b,'effective_at':'2026-08-01'})
+        with self.assertRaises(ValueError):
+            self.t.save('members',{'name':'Other QA','jira_id':'other-qa','role':'QA','country':'JO','team_id':self.b,'qa_slot':'Secondary','effective_at':'2026-08-01'})
+        with self.assertRaises(ValueError):
+            self.t.archive({'resource':'teams','id':self.b})
+        self.t.archive({'resource':'members','id':qa,'effective_at':'2026-08-01'})
+        self.t.save('members',{'name':'Replacement QA','jira_id':'replacement-qa','role':'QA','country':'JO','team_id':self.b,'qa_slot':'Secondary','effective_at':'2026-08-02'})
+        with self.assertRaises(ValueError):
+            self.t.archive({'resource':'members','id':qa,'archived':False,'effective_at':'2026-08-03'})
+
+    def test_shared_assignments_restart_history_and_frozen_report(self):
+        identity=self.shared_member()
+        self.t.finalize({'month':'2026-08','reason':'Close month'})
+        self.t.save('members',{'id':identity,'name':'Shared TPM','jira_id':'shared-TPM','role':'TPM','country':'JO',
+            'team_id':self.a,'effective_at':'2026-08-01'})
+        self.assertTrue(any(m['id']==identity for m in self.t.report('2026-08-01','2026-08-31',self.b)['members']))
+        self.assertTrue(self.t.state()['pending_revisions'])
+        reopened=Tracker(self.t.path)
+        try:
+            from tracker import in_team
+            old=next(m for m in reopened.members_at('2026-07-20T00:00:00+00:00') if m['id']==identity)
+            self.assertTrue(in_team(old,self.b))
+            current=next(m for m in reopened.members_at('2026-09-01T00:00:00+00:00') if m['id']==identity)
+            self.assertFalse(in_team(current,self.b))
+        finally:
+            reopened.db.close()
+
+    def test_shared_tpm_can_follow_up_on_secondary_team(self):
+        identity=self.shared_member()
+        self.t.save('members',{'name':'Dev B','jira_id':'dev-b','role':'Dev','country':'JO','team_id':self.b,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('Blocked',assignee='dev-b'),'blocked.csv','2026-08-02')
+        self.t.add_comment({'ticket_key':'OP-1','author_id':identity,'body':'Shared TPM follow-up','occurred_at':'2026-08-04'})
+        events=self.t.state('2026-08-06')['score_events']
+        self.assertEqual(events,[])
+
+    def test_developer_cannot_have_multiple_teams(self):
+        with self.assertRaises(ValueError):
+            self.shared_member('Dev')
+
+    def test_secondary_team_added_without_new_csv_changes_future_owners_only(self):
+        identity=self.t.save('members',{'name':'Shared QA','jira_id':'shared-QA','role':'QA','country':'JO',
+            'team_id':self.a,'qa_slot':'Primary','effective_at':'2026-07-01'})
+        self.t.save('members',{'name':'Dev B','jira_id':'dev-b','role':'Dev','country':'JO','team_id':self.b,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('QA',assignee='dev-b'),'qa.csv','2026-08-02')
+        self.t.save('members',{'id':identity,'name':'Shared QA','jira_id':'shared-QA','role':'QA','country':'JO',
+            'team_assignments':[{'team_id':self.a,'qa_slot':'Primary'},{'team_id':self.b,'qa_slot':'Secondary'}],
+            'effective_at':'2026-08-04'})
+        before=self.t.state('2026-08-03')['tickets'][0]
+        after=self.t.state('2026-08-05')['tickets'][0]
+        self.assertFalse(any(m['id']==identity for m in before['owners']))
+        self.assertTrue(any(m['id']==identity for m in after['owners']))
+        self.assertEqual(after['last_seen'],'2026-08-02T00:00:00+00:00')
+
+    def test_shared_critical_rewards_are_once_per_person_per_ticket(self):
+        tpm=self.shared_member();qa=self.shared_member('QA')
+        self.t.save('members',{'name':'Dev B','jira_id':'dev-b','role':'Dev','country':'JO','team_id':self.b,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('Done',assignee='dev-b',severity='Critical',critical='2026-08-02T09:00:00Z',resolved='2026-08-03T09:00:00Z'),
+            'done.csv','2026-08-03T12:00:00Z')
+        state=self.t.state('2026-08-04')
+        self.assertEqual(sum(e['points'] for e in state['score_events'] if e['member_id']==tpm),1)
+        self.assertEqual(sum(e['points'] for e in state['score_events'] if e['member_id']==qa),1)
+        self.assertEqual(sum(c['sp'] for c in state['credits']),5)
+
 
 if __name__=='__main__':unittest.main()

@@ -19,6 +19,31 @@ DONE = {'done', 'closed'}
 PAUSED = {'blocked', 'on hold'}
 
 
+def assignments(member):
+    value=member.get('team_assignments')
+    if isinstance(value,str):
+        value=json.loads(value)
+    return value or [{'team_id':int(member['team_id']),'qa_slot':member.get('qa_slot')}]
+
+
+def in_team(member, team_id):
+    if team_id is None:
+        return False
+    return any(a['team_id']==int(team_id) for a in assignments(member))
+
+
+def team_owners(members, developer):
+    result=[]
+    for member in members:
+        if member['id']==developer['id']:
+            result.append(member)
+        elif member['role'] in ('QA','TPM'):
+            for assignment in assignments(member):
+                if assignment['team_id']==developer['team_id']:
+                    result.append({**member,'team_id':assignment['team_id'],'qa_slot':assignment.get('qa_slot')})
+    return result
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -250,7 +275,7 @@ class Tracker:
                 payload['team_id'] = member['team_id'] if member else None
                 if not member:
                     warnings.append(f'{key}: QA/TPM assignee has no previous developer ownership')
-            payload['owners'] = [m for m in members.values() if member and (m['id'] == member['id'] or m['team_id'] == member['team_id'] and m['role'] in ('QA', 'TPM'))]
+            payload['owners'] = team_owners(members.values(),member) if member else []
             payload['sprints'] = [row[i].strip() for i,h in enumerate(headers) if h.strip().casefold()=='sprint' and i<len(row) and row[i].strip()]
             payload['time_in_status'] = []
             chart_index = lookup.get('custom field ([chart] time in status)')
@@ -375,7 +400,7 @@ class Tracker:
                 raise ValueError('Comment predates available ownership evidence')
             ticket=observed[-1]['payload']
             member=[m for m in self.members_at(at) if m['id']==int(data['author_id'])]
-        if not member or member[0]['id'] != ticket['member_id'] and not (member[0]['role'] == 'TPM' and member[0]['team_id'] == ticket['team_id']):
+        if not member or member[0]['id'] != ticket['member_id'] and not (member[0]['role'] == 'TPM' and in_team(member[0],ticket['team_id'])):
             raise ValueError('Choose this ticket’s developer or team TPM')
         body = str(data['body']).strip()
         if not body or not at or at > now():
