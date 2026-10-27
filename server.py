@@ -49,7 +49,7 @@ class StateCache:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def reply(self, status, value, content_type='application/json'):
+    def reply(self, status, value, content_type='application/json', download=None):
         body = json.dumps(value).encode() if content_type == 'application/json' else value
         self.send_response(status)
         self.send_header('Content-Type', content_type)
@@ -57,6 +57,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        if download:
+            self.send_header('Content-Disposition', f'attachment; filename="{download}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -80,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/report':
                 q=parse_qs(parsed.query)
                 self.reply(200,tracker.report(q.get('start_date',[''])[0],q.get('end_date',[''])[0],q.get('team_id',[None])[0],q.get('country',[None])[0],q.get('role',[None])[0],_state=self.server.state_cache.get(tracker)))
+            elif parsed.path == '/api/database/export':
+                self.reply(200, tracker.export_database(), 'application/vnd.sqlite3', 'op-tracker.sqlite3')
             elif parsed.path == '/api/backups':
                 self.reply(200,tracker.backups())
             else:

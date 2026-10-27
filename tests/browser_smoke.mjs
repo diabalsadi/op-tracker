@@ -74,7 +74,7 @@ try {
   const ruleOptions=await page.locator('#rule-form').evaluate(form=>({statuses:[...form.elements.status.options].map(o=>o.value).filter(Boolean),priorities:[...form.elements.severity.options].map(o=>o.value).filter(Boolean)}));
   const ruleState=await (await fetch(origin+'/api/state')).json();
   if(JSON.stringify(ruleOptions.statuses)!==JSON.stringify(ruleState.workflow.map(w=>w.name)))throw Error('Rule status dropdown differs from Workflow configuration');
-  if(JSON.stringify(ruleOptions.priorities)!==JSON.stringify(ruleState.priorities.map(p=>p.name)))throw Error('Rule severity dropdown differs from Priority configuration');
+  if(JSON.stringify(ruleOptions.priorities)!==JSON.stringify(['*',...ruleState.priorities.map(p=>p.name)]))throw Error('Rule severity dropdown differs from Priority configuration');
   await page.locator('#rule-form input[name=effective_at]').fill('2026-10-01T09:00');
   await page.locator('#rule-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
   await page.locator('[data-tab="Sprints"]').click();
@@ -305,6 +305,28 @@ try {
   await scan('Ranking search and position/team filters');
   await page.locator('#clear-people-filters').click();
   await page.locator('#team').selectOption('');await page.locator('#country').selectOption('');
+  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Administration"]').click();
+  await page.locator('[data-tab="Workflow rules"]').click();
+  await page.locator('#rule-form [name=status]').selectOption('Ready for Release');
+  await page.locator('#rule-form [name=severity]').selectOption('*');
+  await page.locator('#rule-form [name=all_sp]').check();
+  if(await page.locator('#rule-form [name=sp]').isEnabled())throw Error('All SP did not disable numeric input');
+  await page.locator('#rule-form [name=calendar]').selectOption('mon_fri');
+  await page.locator('#rule-form button.primary').click();
+  await page.waitForFunction(()=>document.querySelector('#rule-form [name=id]')?.value==='');
+  await page.waitForTimeout(150);
+  const portableConfig=await (await fetch(origin+'/api/config')).json();
+  const portableRule=portableConfig.rules.find(r=>r.status==='Ready for Release'&&r.severity==='*'&&r.sp===-1);
+  if(!portableRule||portableRule.calendar!=='mon_fri')throw Error('Wildcard calendar rule was not saved');
+  await page.locator(`[data-edit-rule="${portableRule.id}"]`).click();
+  if(!await page.locator('#rule-form [name=all_sp]').isChecked())throw Error('All SP edit not preserved');
+  await page.locator('[data-tab="Backup & restore"]').click();
+  const downloadEvent=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Export whole database'}).click();
+  const databaseDownload=await downloadEvent;
+  const databaseBytes=fs.readFileSync(await databaseDownload.path());
+  if(databaseBytes.subarray(0,16).toString()!=='SQLite format 3\0')throw Error('Database export was not SQLite');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}

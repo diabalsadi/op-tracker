@@ -91,6 +91,8 @@ class Tracker:
         CREATE INDEX IF NOT EXISTS comments_ticket ON manual_comments(ticket_key);
         ''')
         with self.db:
+            if 'calendar' not in {r['name'] for r in self.rows('PRAGMA table_info(rules)')}:
+                self.db.execute("ALTER TABLE rules ADD COLUMN calendar TEXT NOT NULL DEFAULT 'country'")
             # Upgraded databases enforce uniqueness only for active role holders.
             # Recreating legacy indexes here would reject archived replacements
             # before the versioned tracker gets a chance to run its migration.
@@ -122,14 +124,14 @@ class Tracker:
         specs = {
             'teams': ['name'],
             'members': ['name', 'jira_id', 'role', 'qa_slot', 'country', 'team_id'],
-            'rules': ['status', 'severity', 'sp', 'days', 'initial', 'daily'],
+            'rules': ['status', 'severity', 'sp', 'days', 'initial', 'daily', 'calendar'],
             'holidays': ['country', 'day', 'name'],
             'countries': ['name', 'weekend', 'timezone'],
         }
         if kind not in specs:
             raise ValueError('Unknown resource')
         cols = specs[kind]
-        obj = {c: data.get(c) for c in cols}
+        obj = {c: data.get(c, 'country' if c == 'calendar' else None) for c in cols}
         for c in cols:
             if isinstance(obj[c], str):
                 obj[c] = obj[c].strip()
@@ -144,8 +146,10 @@ class Tracker:
         if kind == 'rules':
             for c in ('sp', 'days', 'initial', 'daily'):
                 obj[c] = float(obj[c])
-                if not math.isfinite(obj[c]) or obj[c] < 0:
+                if not math.isfinite(obj[c]) or (obj[c] < 0 and not (c == 'sp' and obj[c] == -1)):
                     raise ValueError('Rule values must be finite and nonnegative')
+            if obj['calendar'] not in ('country', 'mon_fri'):
+                raise ValueError('Choose a valid working calendar')
             if obj['days'] <= 0:
                 raise ValueError('Allowed duration must be positive')
         if kind == 'holidays':
@@ -327,24 +331,24 @@ class Tracker:
             old.unlink()
         return dest.name
 
-    def working_day(self, country, d):
+    def working_day(self, country, d, weekend=None):
         cache=getattr(self,'_day_cache',None)
         if cache is None:
             cache=self._day_cache={}
-        key=(country,d)
+        key=(country,d,weekend)
         if key in cache:
             return cache[key]
         c = self.rows('SELECT * FROM countries WHERE code=?', (country,))[0]
-        cache[key]=d.weekday() not in json.loads(c['weekend']) and not bool(self.rows('SELECT id FROM holidays WHERE country=? AND day=?', (country, d.isoformat())))
+        cache[key]=d.weekday() not in (json.loads(c['weekend']) if weekend is None else weekend) and not bool(self.rows('SELECT id FROM holidays WHERE country=? AND day=?', (country, d.isoformat())))
         return cache[key]
 
-    def work(self, start, end, country):
+    def work(self, start, end, country, weekend=None):
         if not start or start >= end:
             return 0.0
         cache=getattr(self,'_work_cache',None)
         if cache is None:
             cache=self._work_cache={}
-        key=(start,end,country)
+        key=(start,end,country,weekend)
         if key in cache:
             return cache[key]
         c = self.rows('SELECT * FROM countries WHERE code=?', (country,))[0]
@@ -357,7 +361,7 @@ class Tracker:
         while current <= b.date():
             low = datetime.combine(current, datetime.min.time(), tz)
             high = datetime.combine(current + timedelta(days=1), datetime.min.time(), tz)
-            if self.working_day(country, current):
+            if self.working_day(country, current, weekend):
                 total += max(0, (min(b, high) - max(a, low)).total_seconds()) / 86400
             current += timedelta(days=1)
         cache[key]=total
@@ -531,8 +535,9 @@ class Tracker:
         if start >= end:
             return
         # Locate each working-day threshold to attribute deductions to the correct month.
+        weekend = (5, 6) if rule.get('calendar') == 'mon_fri' else None
         def elapsed_at(at):
-            return self.work(start, at, member['country']) - sum(self.work(max(start, a), min(at, b), member['country']) for a, b in (pauses or []) if max(start, a) < min(at, b))
+            return self.work(start, at, member['country'], weekend) - sum(self.work(max(start, a), min(at, b), member['country'], weekend) for a, b in (pauses or []) if max(start, a) < min(at, b))
         threshold, elapsed = rule['days'], elapsed_at(end)
         n = 0
         while elapsed > threshold + n + 1e-9:

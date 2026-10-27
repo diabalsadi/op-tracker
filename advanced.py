@@ -94,12 +94,23 @@ class Tracker(BaseTracker):
                                  +[row['severity'] for row in self.rows('SELECT severity FROM rules')]
                                  +[row['name'] for row in self.rows('SELECT name FROM critical_priorities')])
 
+    def export_database(self):
+        """Create a consistent portable SQLite snapshot, including WAL changes."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'tracker.sqlite3'
+            target = sqlite3.connect(path)
+            try:
+                self.db.backup(target)
+            finally:
+                target.close()
+            return path.read_bytes()
+
     def discover_priorities(self, priorities):
         added=[]
         with self.db:
             for priority in priorities:
                 name=str(priority).strip()
-                if name and not self.rows('SELECT name FROM priorities WHERE lower(name)=lower(?)',(name,)):
+                if name and name != '*' and not self.rows('SELECT name FROM priorities WHERE lower(name)=lower(?)',(name,)):
                     self.db.execute('INSERT INTO priorities VALUES(?)',(name,))
                     added.append(name)
             if added:
@@ -176,7 +187,8 @@ class Tracker(BaseTracker):
             rule = json.loads(row['payload'])
             rule['version_id'] = row['id']
             versions[rule['id']] = rule
-        return [r for r in versions.values() if r['status'].casefold() == status.casefold() and r['severity'].casefold() == severity.casefold() and r['sp'] == sp]
+        matches = [r for r in versions.values() if r['status'].casefold() == status.casefold() and (r['severity'] == '*' or r['severity'].casefold() == severity.casefold()) and (r['sp'] == -1 or r['sp'] == sp)]
+        return sorted(matches, key=lambda r: (2 * (r['severity'] != '*') + (r['sp'] != -1), r['id']), reverse=True)[:1]
 
     @calculation_read
     def policy_at(self, at):
@@ -571,7 +583,7 @@ class Tracker(BaseTracker):
                 if self.workflow_at(p['status'])['category'] not in ('active','paused'):
                     continue
                 rules=self.rules_at(p['status'],p['severity'],p['sp'],ep['start'])
-                durations.append({'key':ticket['key'],'status':p['status'],'severity':p['severity'],'sp':p['sp'],'member_id':p['member_id'],'team_id':p['team_id'],'start':ep['start'],'end':stop,'working_days':self.work(ep['start'],stop,owner['country']) if owner else None,'allowed_days':rules[0]['days'] if rules else None,'evidence':'Observed interval; transitions may have occurred between imports'})
+                durations.append({'key':ticket['key'],'status':p['status'],'severity':p['severity'],'sp':p['sp'],'member_id':p['member_id'],'team_id':p['team_id'],'start':ep['start'],'end':stop,'working_days':self.work(ep['start'],stop,owner['country'], (5,6) if rules and rules[0].get('calendar') == 'mon_fri' else None) if owner else None,'allowed_days':rules[0]['days'] if rules else None,'evidence':'Observed interval; transitions may have occurred between imports'})
         result['durations']=durations
         result['pending_revisions']=[]
         for record in self.rows('SELECT * FROM monthly_records WHERE id IN (SELECT max(id) FROM monthly_records GROUP BY member_id,month)'):

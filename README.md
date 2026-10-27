@@ -75,6 +75,8 @@ Repeated history lookups are reused within one calculation. Live projections and
 
 `data/tracker.sqlite3` contains configuration, original CSV contents, snapshots, comments, audit history and monthly records. `data/` is excluded from Git. Automatic consistent backups run before imports and important historical operations; the newest 30 are retained in `data/backups/`.
 
+**Administration → Backup & restore → Export whole database** downloads a consistent SQLite copy containing all application data. To move computers, install the app on the other PC, stop it, retain its existing database as a backup, place the exported file at `data/tracker.sqlite3`, and restart.
+
 **Administration → Backup & restore** creates backups and restores a listed snapshot after explicit confirmation. Restore validates integrity, references and application readability in an isolated copy, then creates a safety backup before replacing the active database. For manual restoration, stop the server, retain a copy of the current database, replace the database file with your chosen backup, and restart.
 
 This is a single-operator localhost application. The separately hosted design prototype uses sample data and is not connected to your database.
