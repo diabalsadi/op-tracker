@@ -29,6 +29,7 @@ class Tracker(BaseTracker):
         CREATE TABLE IF NOT EXISTS monthly_records(id INTEGER PRIMARY KEY,member_id INTEGER NOT NULL REFERENCES members(id),month TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,finalized_at TEXT NOT NULL,reason TEXT NOT NULL,UNIQUE(member_id,month,revision));
         CREATE TABLE IF NOT EXISTS status_id_mappings(status_id TEXT PRIMARY KEY,status_name TEXT NOT NULL,unit TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS critical_priorities(name TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS priorities(name TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS comment_revisions(id INTEGER PRIMARY KEY,comment_id INTEGER NOT NULL REFERENCES manual_comments(id),body TEXT NOT NULL,occurred_at TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL);
         ''')
         with self.db:
@@ -55,6 +56,44 @@ class Tracker(BaseTracker):
                 ('On Hold','paused','["Dev","TPM"]'),('Done','done','[]'),('Closed','done','[]'),('Cancelled','cancelled','[]')])
             if not self.rows('SELECT name FROM critical_priorities'):
                 self.db.execute("INSERT INTO critical_priorities VALUES('Critical')")
+        self.discover_workflow(json.loads(row['payload']).get('status','')
+                               for row in self.rows('SELECT payload FROM observations'))
+        self.discover_priorities([json.loads(row['payload']).get('severity','') for row in self.rows('SELECT payload FROM observations')]
+                                 +[row['severity'] for row in self.rows('SELECT severity FROM rules')]
+                                 +[row['name'] for row in self.rows('SELECT name FROM critical_priorities')])
+
+    def discover_priorities(self, priorities):
+        added=[]
+        with self.db:
+            for priority in priorities:
+                name=str(priority).strip()
+                if name and not self.rows('SELECT name FROM priorities WHERE lower(name)=lower(?)',(name,)):
+                    self.db.execute('INSERT INTO priorities VALUES(?)',(name,))
+                    added.append(name)
+            if added:
+                self.audit('priority_discovery',{'priorities':added})
+        return added
+
+    def discover_workflow(self, statuses):
+        added=[]
+        with self.db:
+            for status in statuses:
+                name=str(status).strip()
+                if name and not self.rows('SELECT name FROM workflow WHERE lower(name)=lower(?)',(name,)):
+                    self.db.execute('INSERT INTO workflow VALUES(?,?,?)',(name,'unconfigured','[]'))
+                    added.append(name)
+            if added:
+                self.audit('workflow_discovery',{'statuses':added})
+        return added
+
+    def import_csv(self, raw, filename, at, mapping=None, preview=False):
+        result=super().import_csv(raw,filename,at,mapping,preview)
+        if not preview:
+            self.discover_workflow(json.loads(row['payload'])['status']
+                                   for row in self.rows('SELECT payload FROM observations WHERE observed_at=?',(timestamp(at),)))
+            self.discover_priorities(json.loads(row['payload'])['severity']
+                                     for row in self.rows('SELECT payload FROM observations WHERE observed_at=?',(timestamp(at),)))
+        return result
 
     def members_at(self, at):
         result = {}
@@ -65,7 +104,7 @@ class Tracker(BaseTracker):
 
     def workflow_at(self, status):
         rows = self.rows('SELECT * FROM workflow WHERE lower(name)=lower(?)', (status,))
-        return rows[0] if rows else {'name': status, 'category': 'active', 'roles': '["Dev","TPM"]'}
+        return rows[0] if rows else {'name': status, 'category': 'unconfigured', 'roles': '[]'}
 
     def is_critical(self,severity):
         return bool(self.rows('SELECT name FROM critical_priorities WHERE lower(name)=lower(?)',(severity,)))
@@ -83,7 +122,7 @@ class Tracker(BaseTracker):
         return json.loads(rows[0]['payload']) if rows else self.settings()
 
     def save(self, kind, data):
-        if kind in ('sprints', 'import_profiles', 'workflow','status_id_mappings','critical_priorities'):
+        if kind in ('sprints', 'import_profiles', 'workflow','status_id_mappings','critical_priorities','priorities'):
             return self.save_extra(kind, data)
         if kind=='holidays' and data.get('end_day') and data['end_day']!=data['day']:
             self._day_cache={};self._work_cache={}
@@ -149,6 +188,19 @@ class Tracker(BaseTracker):
 
     def save_extra(self, kind, data):
         identity = data.get('id')
+        if kind=='priorities':
+            name=str(data['name']).strip()
+            if not name or type(data.get('critical')) is not bool:
+                raise ValueError('Enter a priority name and choose its Critical classification')
+            if not data['critical'] and self.is_critical(name) and len(self.rows('SELECT name FROM critical_priorities'))==1:
+                raise ValueError('Keep at least one Critical priority name; configure its replacement first')
+            self.discover_priorities([name])
+            with self.db:
+                self.db.execute('DELETE FROM critical_priorities WHERE lower(name)=lower(?)',(name,))
+                if data['critical']:
+                    self.db.execute('INSERT INTO critical_priorities VALUES(?)',(name,))
+                self.audit('priority_configuration',data)
+            return name
         if kind=='critical_priorities':
             if not isinstance(data['names'],list):
                 raise ValueError('Priority names must be a list')
@@ -159,6 +211,7 @@ class Tracker(BaseTracker):
                 self.db.execute('DELETE FROM critical_priorities')
                 self.db.executemany('INSERT INTO critical_priorities VALUES(?)',[(n,) for n in dict.fromkeys(names)])
                 self.audit('critical_priorities',data)
+            self.discover_priorities(names)
             return 'priorities'
         if kind=='status_id_mappings':
             status_id=str(data['status_id']).strip();name=str(data['status_name']).strip();unit=data['unit']
@@ -172,10 +225,15 @@ class Tracker(BaseTracker):
             name = str(data['name']).strip()
             category = data['category']
             roles = data['roles'] if isinstance(data['roles'],list) else json.loads(data['roles'])
-            if not name or category not in ('active','paused','done','cancelled','backlog') or not set(roles) <= {'Dev','QA','TPM'}:
+            if not name or category not in ('unconfigured','active','paused','done','cancelled','backlog') or not set(roles) <= {'Dev','QA','TPM'}:
                 raise ValueError('Invalid workflow category or roles')
             if category == 'paused' and set(roles) != {'Dev','TPM'}:
                 raise ValueError('Shared follow-up statuses require Dev and TPM accountability')
+            if category == 'unconfigured':
+                roles=[]
+            existing=self.rows('SELECT name FROM workflow WHERE lower(name)=lower(?)',(name,))
+            if existing:
+                name=existing[0]['name']
             with self.db:
                 self.db.execute('INSERT INTO workflow VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET category=excluded.category,roles=excluded.roles', (name,category,json.dumps(roles)))
                 self.audit('workflow',data)
@@ -384,6 +442,8 @@ class Tracker(BaseTracker):
         result['backups']=self.backups()
         result['status_id_mappings']=self.rows('SELECT * FROM status_id_mappings')
         result['critical_priorities']=[r['name'] for r in self.rows('SELECT name FROM critical_priorities')]
+        result['priorities']=[{'name':r['name'],'critical':self.is_critical(r['name'])}
+                              for r in self.rows('SELECT name FROM priorities ORDER BY name COLLATE NOCASE')]
         for team in result['teams']:
             if team.get('archived'):
                 continue

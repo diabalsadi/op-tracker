@@ -26,7 +26,7 @@ python server.py --port 9000 --db path/to/tracker.sqlite3
 1. **Administration → Teams:** create your teams.
 2. **Members:** enter names, exact Jira account IDs, countries, roles and assignments. Set each person's effective joining date correctly before importing historical exports. Changes create effective-dated versions; archiving/reactivating retains inactive periods and prior records.
 3. **Calendars:** choose weekend days and add country holidays, including date ranges. Existing dates can be edited or removed.
-4. **Workflow:** map your Jira statuses to active, paused, completed, cancelled or backlog categories; configure accountable roles and critical-priority names.
+4. **Workflow:** imported status and priority names appear automatically. Map unconfigured statuses to active, paused, completed, cancelled or backlog categories and set accountable roles. Unconfigured statuses do not generate delivery credit or deductions. In Priority configuration, choose which priority names qualify for Critical rewards. Existing configuration is preserved.
 5. **Workflow rules:** define the severity/estimate combinations, durations and deductions your organization chooses. Effective dates preserve earlier rule versions.
 6. **Targets:** review your delivery and follow-up policy. Policy changes have effective dates. Targets also configures the Critical completion window and reward per owner.
 7. **Sprints:** optionally define reporting periods and team scope.
@@ -54,6 +54,7 @@ Unattributable or undated comments remain visible but cannot establish a follow-
 - Individual, role and team rankings have separate performance/utilization views. Roles without delivery targets are not assigned utilization values.
 - Annual member profiles include interactive monthly charts, evidence and record status. Each profile also lists its latest assigned/accountable tickets across all dates, with counts and current SP totals by status. Select a status or click its summary row to filter the ticket list; click a ticket key to inspect its lifecycle. These status totals are separate from completed delivery credit. Months before joining or during inactive periods are excluded.
 - Delivery reports include observed status durations versus configured allowances. Click a ticket for snapshots, changes, comments, score events and corrections.
+- The current workflow snapshot counts only tickets whose current Jira assignee matches an active configured member, using that member’s team/country filters. Unmapped tickets remain available in Tickets and Imports.
 - CSV report exports use the selected filters. Workflow charts show latest observed state and are labeled accordingly.
 
 ## Monthly history and corrections

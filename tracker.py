@@ -441,7 +441,9 @@ class Tracker:
                 historical = p.get('owners', [])
                 dev = next((m for m in historical if m['id'] == p['member_id']), p.get('developer_snapshot') or byid.get(p['member_id']))
                 category = self.workflow_at(p['status'])['category'] if hasattr(self,'workflow_at') else ('done' if done(p['status']) else 'cancelled' if p['status'].casefold()=='cancelled' else 'active')
-                if not dev or dev['role'] != 'Dev' or category in ('done','cancelled','backlog'):
+                if category=='unconfigured':
+                    warnings.append(f'{key}: configure workflow category and accountable roles for {p["status"]} in Administration → Workflow')
+                if not dev or dev['role'] != 'Dev' or category in ('unconfigured','done','cancelled','backlog'):
                     continue
                 owners = [m for m in (historical or members) if m['id'] == dev['id'] or m['team_id'] == p['team_id'] and m['role'] == 'TPM' or m['team_id'] == p['team_id'] and m['role'] == 'QA' and p['status'].casefold() in ('qa', 'ready for release')]
                 if p['status'].casefold() == 'ready for release':

@@ -17,6 +17,7 @@ try {
   await post('save/members',{name:'Test Developer',jira_id:'dev-a',role:'Dev',country:'JO',team_id:team.id,effective_at:'2026-07-01T00:00:00Z'});
   await post('save/members',{name:'Test TPM',jira_id:'tpm-a',role:'TPM',country:'DO',team_id:team.id,effective_at:'2026-07-01T00:00:00Z'});
   for(const [file,day] of [['day-1',19],['day-2',20]])await post('import/commit',{csv:fs.readFileSync('examples/'+file+'.csv','utf8'),filename:file+'.csv',snapshot_at:`2026-10-${day}T12:00:00Z`});
+  await post('import/commit',{filename:'unmapped.csv',snapshot_at:'2026-10-20T12:00:00Z',csv:'Issue key,Status,Assignee Id,Story Points,Priority\nUNMAPPED-1,External Only,unknown-user,8,Urgent\n'});
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{}),args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
   const page=await browser.newPage({viewport:{width:1280,height:960}}),errors=[];
   page.on('pageerror',e=>{errors.push(e.message);console.error('Page error:',e.message);});page.on('response',async r=>{if(r.status()>=400)console.error('HTTP',r.status(),r.url(),await r.text());});
@@ -29,6 +30,8 @@ try {
     await page.setViewportSize({width:1280,height:960});
   }
   await page.goto(origin);await page.locator('#delivery-chart').waitFor();
+  const workflow=await page.evaluate(()=>{const c=Chart.getChart('workflow-chart');return {labels:c.data.labels,counts:c.data.datasets[0].data};});
+  if(workflow.labels.includes('External Only')||workflow.counts.reduce((a,b)=>a+b,0)!==1)throw Error('Workflow chart included an unconfigured assignee');
   const utcNow=new Date(), dateEnd=utcNow.toISOString().slice(0,10), year=utcNow.getUTCFullYear();
   for(const preset of ['year','quarter','month']){
     const month=preset==='year'?0:preset==='quarter'?Math.floor(utcNow.getUTCMonth()/3)*3:utcNow.getUTCMonth();
@@ -176,6 +179,22 @@ try {
   await page.locator('#profile-person').selectOption('1');
   await page.waitForFunction(()=>document.querySelector('#profile-ticket-status').value==='');
   if(await page.locator('#profile-ticket-list [data-ticket="PROFILE-1"]').count())throw Error('Other member tickets leaked into profile');
+  await page.locator('nav button[data-page="Administration"]').click();
+  await page.locator('[data-tab="Workflow"]').click();
+  await page.locator('[data-edit-workflow="Design Review"]').click();
+  if(await page.locator('#workflow-form select[name=category]').inputValue()!=='unconfigured')throw Error('Discovered workflow was guessed');
+  await page.locator('#workflow-form select[name=category]').selectOption('active');
+  await page.locator('#workflow-form input[name=roles]').fill('Dev,QA,TPM');
+  await page.locator('#workflow-form button').click();
+  await page.getByText('Saved to your local database.',{exact:true}).waitFor();
+  const configured=await (await fetch(origin+'/api/state')).json();
+  if(configured.workflow.find(w=>w.name==='Design Review')?.category!=='active')throw Error('Discovered workflow could not be configured');
+  await page.locator('[data-edit-priority="Urgent"]').click();
+  await page.locator('#priority-config-form select[name=critical]').selectOption('yes');
+  await page.locator('#priority-config-form button').click();
+  await page.getByText('Saved to your local database.',{exact:true}).waitFor();
+  const priorityState=await (await fetch(origin+'/api/state')).json();
+  if(!priorityState.priorities.find(p=>p.name==='Urgent')?.critical)throw Error('Imported priority could not be configured');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}

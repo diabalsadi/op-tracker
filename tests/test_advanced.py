@@ -333,5 +333,54 @@ class HistoricalTests(unittest.TestCase):
         self.assertEqual(events[:len(before)],before)
         self.assertEqual([e['points'] for e in events],[-2,-4,-4])
 
+    def test_import_discovers_statuses_without_guessing_accountability(self):
+        raw=export('Custom Review')
+        self.t.import_csv(raw,'preview.csv','2026-08-02',preview=True)
+        self.assertFalse(self.t.rows('SELECT name FROM workflow WHERE name=?',('Custom Review',)))
+        self.t.import_csv(raw,'commit.csv','2026-08-02')
+        self.assertEqual(self.t.workflow_at('Custom Review')['category'],'unconfigured')
+        self.assertEqual(json.loads(self.t.workflow_at('Custom Review')['roles']),[])
+        self.t.save('rules',{'status':'Custom Review','severity':'High','sp':5,'days':1,
+            'initial':2,'daily':1,'effective_at':'2026-07-01'})
+        self.assertEqual(self.t.state('2026-08-10')['score_events'],[])
+        self.t.save('workflow',{'name':'custom review','category':'active','roles':['Dev']})
+        self.assertTrue(self.t.state('2026-08-10')['score_events'])
+        self.assertEqual(len(self.t.rows('SELECT name FROM workflow WHERE lower(name)=?',('custom review',))),1)
+
+    def test_status_discovery_preserves_existing_configuration(self):
+        self.t.save('workflow',{'name':'QA Review','category':'active','roles':['Dev','QA','TPM']})
+        self.assertEqual(self.t.discover_workflow(['QA Review','qa review','New Status','New Status']),['New Status'])
+        self.assertEqual(self.t.workflow_at('QA Review')['category'],'active')
+        reopened=Tracker(self.t.path)
+        try:
+            self.assertEqual(reopened.workflow_at('New Status')['category'],'unconfigured')
+        finally:
+            reopened.db.close()
+
+    def test_priority_discovery_and_configuration(self):
+        raw=export('In Progress',severity='Urgent')
+        self.t.import_csv(raw,'preview.csv','2026-08-02',preview=True)
+        self.assertFalse(self.t.rows('SELECT name FROM priorities WHERE name=?',('Urgent',)))
+        self.t.import_csv(raw,'commit.csv','2026-08-02')
+        self.assertTrue(self.t.rows('SELECT name FROM priorities WHERE name=?',('Urgent',)))
+        self.assertFalse(self.t.is_critical('Urgent'))
+        self.t.save('priorities',{'name':'Urgent','critical':True})
+        self.assertTrue(self.t.is_critical('Urgent'))
+        self.t.discover_priorities(['urgent','Urgent'])
+        self.assertEqual(len(self.t.rows('SELECT name FROM priorities WHERE lower(name)=?',('urgent',))),1)
+        self.t.save('priorities',{'name':'Urgent','critical':False})
+        self.assertFalse(self.t.is_critical('Urgent'))
+        self.assertTrue(self.t.is_critical('Critical'))
+
+    def test_existing_priorities_are_backfilled_on_restart(self):
+        self.t.import_csv(export(severity='Medium'),'medium.csv','2026-08-02')
+        with self.t.db:
+            self.t.db.execute('DELETE FROM priorities')
+        reopened=Tracker(self.t.path)
+        try:
+            self.assertTrue(reopened.rows('SELECT name FROM priorities WHERE name=?',('Medium',)))
+        finally:
+            reopened.db.close()
+
 
 if __name__=='__main__':unittest.main()
