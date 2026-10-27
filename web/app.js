@@ -10,6 +10,8 @@ let state, page = 'Overview', period = today.toISOString().slice(0,7), team = ''
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
 let profileTicketStatus = '';
 let charts = [], profileId = null, profileYear = today.getFullYear(), profileMonth = today.getMonth(), ticketKey = null;
+let stateDirty=false;
+const reportCache=new Map();
 let reportData=null,profileData=null,profileRoster=[],renderSequence=0,rankingScope='Individual';
 let pendingImport = null, importResult = null, edit = null, rankMetric = 'score', rankRole = '';
 const countryName = code => state.countries.find(c => c.code === code)?.name || code;
@@ -30,12 +32,31 @@ const workflowTickets = () => state.tickets.filter(t=>{const assignee=state.memb
 const monthOf = at => at?.slice(0,7);
 function announce(text, error=false) { $('#notice').className = error ? 'notice error' : 'notice'; $('#notice').textContent = text; }
 async function api(path, data) {
-  const response = await fetch('/api/'+path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'Request failed');
-  return result;
+  const cached=data===undefined&&path.startsWith('report?')?reportCache.get(path):null;
+  if(cached&&cached.expires>Date.now())return cached.promise;
+  const promise=(async()=>{
+    const response=await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Request failed');
+    if(data!==undefined&&!['import/preview','export'].includes(path)){reportCache.clear();stateDirty=true;}
+    return result;
+  })();
+  if(data===undefined&&path.startsWith('report?')){
+    for(const [key,entry] of reportCache)if(entry.expires<=Date.now())reportCache.delete(key);
+    if(reportCache.size>=20)reportCache.delete(reportCache.keys().next().value);
+    reportCache.set(path,{promise,expires:Date.now()+5000});
+    promise.catch(()=>{if(reportCache.get(path)?.promise===promise)reportCache.delete(path);});
+  }
+  return promise;
 }
-async function reload() { state = await api('state');const badge=$('#data-status');badge.className='badge'+(state.stale_days>1?' warning':'');badge.textContent=state.stale_days===null?'No imports yet':state.stale_days>1?'Data '+state.stale_days+' days old · Upload today’s snapshot':'Daily data · Latest snapshot '+state.imports[0].snapshot_at.slice(0,10); }
+function updateDataStatus(){const badge=$('#data-status');badge.className='badge'+(state.stale_days>1?' warning':'');badge.textContent=state.stale_days===null?'No imports yet':state.stale_days>1?'Data '+state.stale_days+' days old · Upload today’s snapshot':'Daily data · Latest snapshot '+state.imports[0].snapshot_at.slice(0,10);}
+async function reload(force=false) {
+  const partial=state&&page==='Administration'&&!force;
+  const data=await api(partial?'config':'state');
+  state=partial?{...state,...data}:data;
+  if(!partial)stateDirty=false;
+  updateDataStatus();
+}
 function destroyCharts() { charts.forEach(c => c.destroy()); charts = []; }
 function monthlyMetric(m, month) {
   const credits = state.credits.filter(c => c.member_id === m.id && monthOf(c.at) === month);
@@ -69,7 +90,10 @@ async function render() {
   today=new Date();
   if(activePreset){const y=today.getUTCFullYear(),m=today.getUTCMonth();startDate=activePreset==='year'?`${y}-01-01`:`${y}-${String((activePreset==='quarter'?Math.floor(m/3)*3:m)+1).padStart(2,'0')}-01`;endDate=today.toISOString().slice(0,10);}
   const sequence=++renderSequence;
-  try {reportData=await api('report?'+new URLSearchParams({start_date:startDate,end_date:endDate,...(team?{team_id:team}:{}),...(country?{country}:{} )}));}catch(error){announce(error.message,true);return;}
+  try {
+    if(stateDirty&&page!=='Administration')await reload(true);
+    if(!['Administration','Imports','Tickets'].includes(page))reportData=await api('report?'+new URLSearchParams({start_date:startDate,end_date:endDate,...(team?{team_id:team}:{}),...(country?{country}:{} )}));
+  }catch(error){announce(error.message,true);return;}
   if(sequence!==renderSequence)return;
   destroyCharts(); profileId=null; ticketKey=null;
   $('nav').innerHTML=pages.map(p=>`<button data-page="${p}" ${p===page?'aria-current="page"':''}>${p}</button>`).join('');
@@ -206,6 +230,7 @@ function renderAdmin() {
 }
 function object(form){const d=Object.fromEntries(new FormData(form));if(d.id==='')delete d.id;return d;}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try {
+  if(b.id==='recalculate'){const person=profileId,ticketId=ticketKey;b.disabled=true;announce('Recalculating live results…');state=await api('recalculate',{});stateDirty=false;updateDataStatus();if(person!==null)await profile(person);else if(ticketId)await ticket(ticketId);else if(page==='Administration')renderAdminMemberDirectory();else await render();announce('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.');b.disabled=false;}
   if(b.id==='clear-admin-member-filters'){adminMemberFilters={query:'',role:'',team:'',country:''};for(const id of ['search','role','team','country'])$('#admin-member-'+id).value='';renderAdminMemberDirectory();}
   if(b.dataset.range){
     activePreset=b.dataset.range;

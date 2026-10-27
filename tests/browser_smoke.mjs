@@ -20,6 +20,8 @@ try {
   await post('import/commit',{filename:'unmapped.csv',snapshot_at:'2026-10-20T12:00:00Z',csv:'Issue key,Status,Assignee Id,Story Points,Priority\nUNMAPPED-1,External Only,unknown-user,8,Urgent\n'});
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{}),args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
   const page=await browser.newPage({viewport:{width:1280,height:960}}),errors=[];
+  const apiRequests=[];
+  page.on('request',r=>{const path=new URL(r.url()).pathname;if(path.startsWith('/api/'))apiRequests.push(path);});
   page.on('pageerror',e=>{errors.push(e.message);console.error('Page error:',e.message);});page.on('response',async r=>{if(r.status()>=400)console.error('HTTP',r.status(),r.url(),await r.text());});
   async function scan(label){
     for(const width of [1280,1024,736,540,360,320]){
@@ -36,8 +38,7 @@ try {
   for(const preset of ['year','quarter','month']){
     const month=preset==='year'?0:preset==='quarter'?Math.floor(utcNow.getUTCMonth()/3)*3:utcNow.getUTCMonth();
     const expectedStart=`${year}-${String(month+1).padStart(2,'0')}-01`;
-    const response=page.waitForResponse(r=>r.url().includes('/api/report?')&&new URL(r.url()).searchParams.get('start_date')===expectedStart);
-    await page.locator(`[data-range="${preset}"]`).click();await response;
+    await page.locator(`[data-range="${preset}"]`).click();
     await page.waitForFunction(([a,b])=>document.querySelector('#start-date').value===a&&document.querySelector('#end-date').value===b,[expectedStart,dateEnd]);
     await page.locator(`[data-range="${preset}"][aria-pressed=true]`).waitFor();
     const rendered=await page.locator('.grid .panel').first().innerText();
@@ -64,7 +65,11 @@ try {
   await page.locator('[data-tab="Members"]').click();
   await page.locator('#member-form input[name=name]').fill('Created In Browser');
   await page.locator('#member-form input[name=jira_id]').fill('browser-user');
+  const saveRequestsStart=apiRequests.length;
   await page.locator('#member-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
+  await page.locator('#admin-member-directory').getByText('browser-user',{exact:true}).waitFor();
+  const saveRequests=apiRequests.slice(saveRequestsStart);
+  if(!saveRequests.includes('/api/config')||saveRequests.some(path=>path==='/api/state'||path==='/api/report'))throw Error('Administration save triggered full calculations: '+saveRequests.join(','));
   await page.locator('[data-tab="Workflow rules"]').click();
   const ruleOptions=await page.locator('#rule-form').evaluate(form=>({statuses:[...form.elements.status.options].map(o=>o.value).filter(Boolean),priorities:[...form.elements.severity.options].map(o=>o.value).filter(Boolean)}));
   const ruleState=await (await fetch(origin+'/api/state')).json();
@@ -88,6 +93,10 @@ try {
   await page.getByText('48 SP target · Selected dates',{exact:true}).waitFor();
   await page.locator('nav button[data-page="Members"]').click();await page.locator('[data-person]').first().click();await page.locator('#year-score').waitFor();
   await scan('Annual member profile');
+  const profileRefresh=page.waitForResponse(r=>r.url().endsWith('/api/recalculate'));
+  await page.locator('#recalculate').click();await profileRefresh;
+  await page.locator('#recalculate:not([disabled])').waitFor();
+  if(await page.locator('#title').innerText()!=='Test Developer')throw Error('Recalculation left the member profile');
   await page.locator('#profile-country').selectOption('DO');await page.waitForFunction(()=>document.querySelector('#title').textContent==='Test TPM');
   if(await page.locator('#year-util').count())throw Error('TPM should not have a utilization chart');
   await page.locator('#profile-country').selectOption('JO');await page.waitForFunction(()=>document.querySelector('#subtitle').textContent.includes('Jordan'));await page.locator('#profile-person').selectOption('1');await page.waitForFunction(()=>document.querySelector('#title').textContent==='Test Developer');
@@ -96,6 +105,11 @@ try {
   await page.locator('nav button[data-page="Tickets"]').click();await page.locator('[data-ticket]').first().click();await page.locator('#comment-form').waitFor();
   await scan('Ticket lifecycle');
   await page.locator('#comment-form textarea').fill('Browser-tested follow-up');await page.locator('#comment-form button').click();await page.getByText('Follow-up saved.',{exact:true}).waitFor();
+  const ticketRefresh=page.waitForResponse(r=>r.url().endsWith('/api/recalculate'));
+  await page.locator('#recalculate').click();await ticketRefresh;
+  await page.locator('#recalculate:not([disabled])').waitFor();
+  await page.locator('#comment-form').waitFor();
+  if(await page.locator('#title').innerText()!=='OP-1')throw Error('Recalculation left the ticket');
   await page.locator('.comment-revision-form textarea').fill('Revised browser follow-up');
   await page.locator('.comment-revision-form input[name=reason]').fill('Fix test wording');
   await page.locator('.comment-revision-form button').click();await page.getByText('Comment revision saved; original entry retained.',{exact:true}).waitFor();
@@ -253,6 +267,14 @@ try {
   await scan('Administration member search and filters');
   await page.locator('#clear-admin-member-filters').click();
   if(await page.locator('#admin-member-directory [data-edit-member]').count()!==sharedState.members.length)throw Error('Clear member filters did not restore directory');
+  const beforeRecalculation=await (await fetch(origin+'/api/state')).json();
+  const recalculated=page.waitForResponse(r=>r.url().endsWith('/api/recalculate')&&r.request().method()==='POST');
+  await page.locator('#recalculate').click();const recalculationResponse=await recalculated;
+  if(!recalculationResponse.ok())throw Error(await recalculationResponse.text());
+  const afterRecalculation=await recalculationResponse.json();
+  if(JSON.stringify(beforeRecalculation.monthly_records)!==JSON.stringify(afterRecalculation.monthly_records))throw Error('Recalculate changed finalized monthly revisions');
+  await page.getByText('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.',{exact:true}).waitFor();
+  if(await page.locator('#member-form input[name=name]').inputValue()!=='Unsaved draft name')throw Error('Recalculate discarded an unsaved member edit');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}

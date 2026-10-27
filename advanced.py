@@ -6,10 +6,38 @@ import math
 import sqlite3
 import copy
 import tempfile
+from functools import wraps
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from tracker import Tracker as BaseTracker, now, timestamp, assignments, in_team, team_owners
+
+
+def calculation_scope(method):
+    @wraps(method)
+    def wrapped(self,*args,**kwargs):
+        outer=getattr(self,'_calculation_cache',None) is not None
+        if not outer:
+            self._calculation_cache={}
+        try:
+            return method(self,*args,**kwargs)
+        finally:
+            if not outer:
+                self._calculation_cache=None
+    return wrapped
+
+
+def calculation_read(method):
+    @wraps(method)
+    def wrapped(self,*args,**kwargs):
+        cache=getattr(self,'_calculation_cache',None)
+        if cache is None:
+            return method(self,*args,**kwargs)
+        key=(method.__name__,args,tuple(sorted(kwargs.items())))
+        if key not in cache:
+            cache[key]=method(self,*args,**kwargs)
+        return cache[key]
+    return wrapped
 
 
 class Tracker(BaseTracker):
@@ -31,6 +59,8 @@ class Tracker(BaseTracker):
         CREATE TABLE IF NOT EXISTS critical_priorities(name TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS priorities(name TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS comment_revisions(id INTEGER PRIMARY KEY,comment_id INTEGER NOT NULL REFERENCES manual_comments(id),body TEXT NOT NULL,occurred_at TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS corrections_ticket_time ON corrections(ticket_key,effective_at,id);
+        CREATE INDEX IF NOT EXISTS comment_revisions_comment ON comment_revisions(comment_id,id);
         ''')
         with self.db:
             for table in ('members', 'teams'):
@@ -97,6 +127,7 @@ class Tracker(BaseTracker):
                                      for row in self.rows('SELECT payload FROM observations WHERE observed_at=?',(timestamp(at),)))
         return result
 
+    @calculation_read
     def members_at(self, at):
         result = {}
         for row in self.rows('SELECT * FROM member_versions WHERE effective_at<=? ORDER BY effective_at,id', (at,)):
@@ -129,13 +160,16 @@ class Tracker(BaseTracker):
                         if existing['team_id']==team_id and (member['role']=='TPM' or member['role']=='QA' and existing.get('qa_slot')==assignment.get('qa_slot')):
                             raise ValueError('That team role is occupied during the selected assignment period')
 
+    @calculation_read
     def workflow_at(self, status):
         rows = self.rows('SELECT * FROM workflow WHERE lower(name)=lower(?)', (status,))
         return rows[0] if rows else {'name': status, 'category': 'unconfigured', 'roles': '[]'}
 
+    @calculation_read
     def is_critical(self,severity):
         return bool(self.rows('SELECT name FROM critical_priorities WHERE lower(name)=lower(?)',(severity,)))
 
+    @calculation_read
     def rules_at(self, status, severity, sp, at):
         versions = {}
         for row in self.rows('SELECT * FROM rule_versions WHERE effective_at<=? ORDER BY effective_at,id', (at,)):
@@ -144,6 +178,7 @@ class Tracker(BaseTracker):
             versions[rule['id']] = rule
         return [r for r in versions.values() if r['status'].casefold() == status.casefold() and r['severity'].casefold() == severity.casefold() and r['sp'] == sp]
 
+    @calculation_read
     def policy_at(self, at):
         rows = self.rows('SELECT * FROM policy_versions WHERE effective_at<=? ORDER BY effective_at DESC,id DESC LIMIT 1', (at,))
         return json.loads(rows[0]['payload']) if rows else self.settings()
@@ -377,6 +412,7 @@ class Tracker(BaseTracker):
             self.db.execute('INSERT INTO comment_revisions(comment_id,body,occurred_at,reason,created_at) VALUES(?,?,?,?,?)',(data['id'],body,at,reason,now()))
             self.audit('comment_revision',data)
 
+    @calculation_read
     def ticket(self,key):
         result=super().ticket(key)
         for c in self.rows('SELECT * FROM corrections WHERE ticket_key=? ORDER BY effective_at,id',(key,)):
@@ -403,14 +439,15 @@ class Tracker(BaseTracker):
                 item=copy.deepcopy(actual[at]);last=item['payload']
                 enriched.append(item)
                 continue
-            p=copy.deepcopy(last)
             roster=self.members_at(at)
-            dev=next((m for m in roster if m['id']==p['member_id'] and m['role']=='Dev'),None)
-            p['team_id']=dev['team_id'] if dev else last.get('team_id')
-            p['member_id']=dev['id'] if dev else last.get('member_id')
-            p['developer_snapshot']=dev or last.get('developer_snapshot') or next((m for m in last.get('owners',[]) if m['id']==last.get('member_id')),None)
-            p['owners']=team_owners(roster,dev or {'id':p['member_id'],'team_id':p['team_id']})
-            if p['owners']!=last.get('owners',[]) or p['member_id']!=last.get('member_id'):
+            dev=next((m for m in roster if m['id']==last['member_id'] and m['role']=='Dev'),None)
+            team_id=dev['team_id'] if dev else last.get('team_id')
+            member_id=dev['id'] if dev else last.get('member_id')
+            owners=team_owners(roster,dev or {'id':member_id,'team_id':team_id})
+            if owners!=last.get('owners',[]) or member_id!=last.get('member_id'):
+                p=copy.deepcopy(last)
+                p.update(team_id=team_id,member_id=member_id,owners=owners,
+                         developer_snapshot=dev or last.get('developer_snapshot') or next((m for m in last.get('owners',[]) if m['id']==last.get('member_id')),None))
                 enriched.append({'id':-len(enriched),'ticket_key':key,'import_id':None,'observed_at':at,'payload':p,'virtual':True})
                 result['events'].append({'at':at,'kind':'ownership/calendar','from':last.get('team_id'),'to':{'team_id':p['team_id'],'owners':[{'name':m['name'],'role':m['role'],'country':m['country']} for m in p['owners']]},'evidence':'Effective-dated local member/team configuration'})
                 last=p
@@ -463,6 +500,35 @@ class Tracker(BaseTracker):
                         threshold+=1;n+=1
                     elapsed+=fraction;day+=timedelta(days=1)
 
+    def configuration(self):
+        """Administration data without calculating ticket histories or reports."""
+        result={name:self.rows(query) for name,query in {
+            'members':'SELECT * FROM members ORDER BY name',
+            'teams':'SELECT * FROM teams ORDER BY name',
+            'countries':'SELECT * FROM countries',
+            'holidays':'SELECT * FROM holidays ORDER BY day',
+            'rules':'SELECT * FROM rules',
+            'workflow':'SELECT * FROM workflow',
+            'sprints':'SELECT * FROM sprints ORDER BY start_date DESC',
+            'import_profiles':'SELECT * FROM import_profiles',
+            'membership_history':'SELECT * FROM member_versions ORDER BY effective_at,id',
+            'rule_history':'SELECT * FROM rule_versions ORDER BY effective_at,id',
+            'policy_history':'SELECT * FROM policy_versions ORDER BY effective_at,id',
+            'monthly_records':'SELECT id,member_id,month,revision,finalized_at,reason FROM monthly_records ORDER BY month DESC,revision DESC',
+            'status_id_mappings':'SELECT * FROM status_id_mappings',
+            'imports':'SELECT id,filename,snapshot_at,created_at FROM imports ORDER BY snapshot_at DESC,id DESC',
+        }.items()}
+        for member in result['members']:
+            member['team_assignments']=assignments(member)
+        result['settings']=self.settings()
+        result['backups']=self.backups()
+        result['critical_priorities']=[r['name'] for r in self.rows('SELECT name FROM critical_priorities')]
+        result['priorities']=[{'name':r['name'],'critical':self.is_critical(r['name'])}
+                              for r in self.rows('SELECT name FROM priorities ORDER BY name COLLATE NOCASE')]
+        result['stale_days']=max(0,math.floor((datetime.fromisoformat(now())-datetime.fromisoformat(result['imports'][0]['snapshot_at'])).total_seconds()/86400)) if result['imports'] else None
+        return result
+
+    @calculation_scope
     def state(self,asof=None):
         result=super().state(asof)
         for member in result['members']:
@@ -641,19 +707,22 @@ class Tracker(BaseTracker):
             self.audit('monthly_finalization',{'month':month,'count':count,'reason':reason,'revise':bool(data.get('revise'))})
         return count
 
-    def refresh_records(self):
-        state=self.state()
+    def refresh_records(self,_state=None):
+        state=_state if _state is not None else self.state()
         if not state['imports']:
-            return
+            return 0
+        count=0
         evidence_dates=[i['snapshot_at'][:10] for i in state['imports']]+[c['at'][:10] for c in state['credits']]
         cursor=date.fromisoformat(min(evidence_dates)).replace(day=1)
         while cursor<date.today().replace(day=1):
             month=cursor.isoformat()[:7]
             if not self.rows('SELECT id FROM monthly_records WHERE month=? LIMIT 1',(month,)):
-                self.finalize({'month':month,'reason':'Automatic elapsed-month finalization'},_state=state)
+                count+=self.finalize({'month':month,'reason':'Automatic elapsed-month finalization'},_state=state)
             cursor=(cursor.replace(day=28)+timedelta(days=4)).replace(day=1)
+        return count
 
-    def report(self,start_date,end_date,team_id=None,country=None,role=None,live=False):
+    @calculation_scope
+    def report(self,start_date,end_date,team_id=None,country=None,role=None,live=False,_state=None):
         a,b=date.fromisoformat(start_date),date.fromisoformat(end_date)
         if a>b or (b-a).days>3660 or b>date.today():
             raise ValueError('Select a nonfuture date range of at most ten years')
@@ -661,7 +730,7 @@ class Tracker(BaseTracker):
         months=[];d=a.replace(day=1)
         while d<=b:
             months.append(d.isoformat()[:7]);d=(d.replace(day=28)+timedelta(days=4)).replace(day=1)
-        state=self.state()
+        state=_state if _state is not None else self.state()
         rows=[]
         for member in state['members']:
             monthly=[]
@@ -700,8 +769,8 @@ class Tracker(BaseTracker):
                 'sp':sum(r['sp'] for r in rows),'target':sum(r['target'] for r in rows),
                 'score':sum(r['score'] for r in rows if r['score'] is not None)/sum(r['score'] is not None for r in rows) if any(r['score'] is not None for r in rows) else None}
 
-    def export(self,data):
-        report=self.report(data['start_date'],data['end_date'],data.get('team_id'),data.get('country'),data.get('role'))
+    def export(self,data,_state=None):
+        report=self.report(data['start_date'],data['end_date'],data.get('team_id'),data.get('country'),data.get('role'),_state=_state)
         stream=io.StringIO();writer=csv.writer(stream)
         writer.writerow(['Member','Jira ID','Role','Team IDs','Country','Delivered SP','Target SP','Utilization %','Average score','Start','End'])
         for r in report['members']:

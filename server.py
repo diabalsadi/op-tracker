@@ -5,6 +5,7 @@ import json
 import mimetypes
 import sqlite3
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -12,6 +13,39 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from tracker import DEFAULT_DB, ROOT
 from advanced import Tracker
+
+
+class StateCache:
+    """Short-lived live projections, invalidated by writes and database changes."""
+    def __init__(self, ttl=5):
+        self.ttl=ttl
+        self.invalidate()
+
+    def invalidate(self):
+        self.value=None
+        self.signature=None
+        self.expires=0
+
+    def get(self, tracker):
+        def signature():
+            values=[]
+            for path in (tracker.path,Path(str(tracker.path)+'-wal')):
+                try:
+                    stat=path.stat();values.append((stat.st_mtime_ns,stat.st_size))
+                except FileNotFoundError:
+                    values.append(None)
+            return (str(tracker.path.resolve()),tuple(values))
+        current=signature()
+        if self.value is not None and self.signature==current and time.monotonic()<self.expires:
+            return self.value
+        value=tracker.state()
+        if tracker.refresh_records(_state=value):
+            value=tracker.state()
+            current=signature()
+        self.value=value
+        self.signature=current
+        self.expires=time.monotonic()+self.ttl
+        return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -30,24 +64,26 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
             return self.reply(403, {'error': 'Use the localhost application address'})
         parsed = urlparse(self.path)
+        if not parsed.path.startswith('/api/'):
+            file=(ROOT/'web'/unquote(parsed.path).lstrip('/')).resolve() if parsed.path!='/' else ROOT/'web'/'index.html'
+            if not file.is_relative_to(ROOT/'web') or not file.is_file():
+                return self.reply(404,{'error':'Not found'})
+            return self.reply(200,file.read_bytes(),mimetypes.guess_type(file)[0] or 'application/octet-stream')
         tracker = Tracker(self.server.db_path)
         try:
             if parsed.path == '/api/state':
-                tracker.refresh_records()
-                self.reply(200, tracker.state())
+                self.reply(200, self.server.state_cache.get(tracker))
+            elif parsed.path == '/api/config':
+                self.reply(200,tracker.configuration())
             elif parsed.path == '/api/ticket':
                 self.reply(200, tracker.ticket(parse_qs(parsed.query).get('key', [''])[0]))
             elif parsed.path == '/api/report':
                 q=parse_qs(parsed.query)
-                self.reply(200,tracker.report(q.get('start_date',[''])[0],q.get('end_date',[''])[0],q.get('team_id',[None])[0],q.get('country',[None])[0],q.get('role',[None])[0]))
+                self.reply(200,tracker.report(q.get('start_date',[''])[0],q.get('end_date',[''])[0],q.get('team_id',[None])[0],q.get('country',[None])[0],q.get('role',[None])[0],_state=self.server.state_cache.get(tracker)))
             elif parsed.path == '/api/backups':
                 self.reply(200,tracker.backups())
             else:
-                file = (ROOT / 'web' / unquote(parsed.path).lstrip('/')).resolve() if parsed.path != '/' else ROOT / 'web' / 'index.html'
-                if not file.is_relative_to(ROOT / 'web') or not file.is_file():
-                    self.reply(404, {'error': 'Not found'})
-                else:
-                    self.reply(200, file.read_bytes(), mimetypes.guess_type(file)[0] or 'application/octet-stream')
+                self.reply(404, {'error': 'Not found'})
         except ValueError as exc:
             self.reply(400, {'error': str(exc)})
         finally:
@@ -60,6 +96,7 @@ class Handler(BaseHTTPRequestHandler):
         if host not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}') or self.headers.get('Origin') not in (None, expected) or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
             return self.reply(403, {'error': 'Use the local application origin and JSON requests'})
         tracker = Tracker(self.server.db_path)
+        route=urlparse(self.path).path
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size <= 20 * 1024 * 1024:
@@ -70,6 +107,9 @@ class Handler(BaseHTTPRequestHandler):
             route = urlparse(self.path).path
             if route in ('/api/import/preview', '/api/import/commit'):
                 result = tracker.import_csv(data['csv'], data.get('filename', 'jira.csv'), data['snapshot_at'], data.get('mapping'), route.endswith('preview'))
+            elif route == '/api/recalculate':
+                self.server.state_cache.invalidate()
+                result=self.server.state_cache.get(tracker)
             elif route == '/api/settings':
                 tracker.update_settings(data)
                 result = {'ok': True}
@@ -96,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route == '/api/finalize':
                 result={'count':tracker.finalize(data)}
             elif route == '/api/export':
-                result=tracker.export(data)
+                result=tracker.export(data,_state=self.server.state_cache.get(tracker))
             elif route.startswith('/api/save/'):
                 result = {'id': tracker.save(route.rsplit('/', 1)[1], data)}
             else:
@@ -106,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
             message = 'This Jira identity, team name, role slot, holiday or workflow rule already exists. Check your assignments.' if isinstance(exc, sqlite3.IntegrityError) else str(exc)
             self.reply(400, {'error': message})
         finally:
+            if route not in ('/api/import/preview','/api/export','/api/recalculate'):
+                self.server.state_cache.invalidate()
             tracker.db.close()
 
 
@@ -118,6 +160,7 @@ def main():
     Tracker(args.db).db.close()
     server = HTTPServer(('127.0.0.1', args.port), Handler)
     server.db_path = args.db
+    server.state_cache=StateCache()
     if args.open:
         threading.Timer(0.5,lambda:webbrowser.open(f'http://127.0.0.1:{server.server_port}')).start()
     print(f'OP Tracker: http://127.0.0.1:{args.port} | database: {args.db.resolve()}', flush=True)

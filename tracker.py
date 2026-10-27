@@ -87,6 +87,8 @@ class Tracker:
         CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,import_id INTEGER NOT NULL REFERENCES imports(id),ticket_key TEXT NOT NULL,observed_at TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(import_id,ticket_key));
         CREATE TABLE IF NOT EXISTS manual_comments(id INTEGER PRIMARY KEY,ticket_key TEXT NOT NULL,author_id INTEGER NOT NULL REFERENCES members(id),body TEXT NOT NULL,occurred_at TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,created_at TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS observations_ticket_time ON observations(ticket_key,observed_at,id);
+        CREATE INDEX IF NOT EXISTS comments_ticket ON manual_comments(ticket_key);
         ''')
         with self.db:
             # Upgraded databases enforce uniqueness only for active role holders.

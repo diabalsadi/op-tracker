@@ -65,6 +65,12 @@ Configuration history is visible in Administration. Ticket corrections and manua
 
 An export containing aggregate Time in Status data does not establish chronological transitions. The app retains encoded totals and provides status-ID/unit mapping controls. Verify those mappings before interpreting hours. Exact historical transitions or the moment a priority changed cannot be recovered from a current-state-only export; supply trustworthy history or an audited correction instead of guessing.
 
+## Refresh and performance
+
+Administration saves update configuration without recalculating all ticket histories. Dashboard navigation refreshes changed data automatically. **Recalculate** refreshes live delivery and score calculations on demand while preserving finalized monthly records; use Monthly records for an explicit revision.
+
+Repeated history lookups are reused within one calculation. Live projections and matching report requests have a five-second cache; application writes invalidate it immediately, and the server also detects database-file changes. Static assets do not open the database. Read-only administration refreshes do not trigger full reports.
+
 ## Data and backup
 
 `data/tracker.sqlite3` contains configuration, original CSV contents, snapshots, comments, audit history and monthly records. `data/` is excluded from Git. Automatic consistent backups run before imports and important historical operations; the newest 30 are retained in `data/backups/`.
