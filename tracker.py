@@ -8,6 +8,7 @@ import json
 import math
 import re
 import sqlite3
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -56,8 +57,6 @@ class Tracker:
         CREATE TABLE IF NOT EXISTS holidays(id INTEGER PRIMARY KEY,country TEXT REFERENCES countries(code),day TEXT NOT NULL,name TEXT NOT NULL,UNIQUE(country,day));
         CREATE TABLE IF NOT EXISTS teams(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS members(id INTEGER PRIMARY KEY,name TEXT NOT NULL,jira_id TEXT NOT NULL UNIQUE,role TEXT NOT NULL CHECK(role IN ('Dev','QA','TPM')),qa_slot TEXT,country TEXT NOT NULL REFERENCES countries(code),team_id INTEGER NOT NULL REFERENCES teams(id));
-        CREATE UNIQUE INDEX IF NOT EXISTS one_tpm ON members(team_id) WHERE role='TPM';
-        CREATE UNIQUE INDEX IF NOT EXISTS one_qa_slot ON members(team_id,qa_slot) WHERE role='QA';
         CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY,status TEXT NOT NULL,severity TEXT NOT NULL,sp REAL NOT NULL,days REAL NOT NULL,initial REAL NOT NULL,daily REAL NOT NULL,created_at TEXT NOT NULL,UNIQUE(status,severity,sp));
         CREATE TABLE IF NOT EXISTS imports(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,snapshot_at TEXT NOT NULL,hash TEXT NOT NULL,raw TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(hash,snapshot_at));
         CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,import_id INTEGER NOT NULL REFERENCES imports(id),ticket_key TEXT NOT NULL,observed_at TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(import_id,ticket_key));
@@ -65,12 +64,20 @@ class Tracker:
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,created_at TEXT NOT NULL,payload TEXT NOT NULL);
         ''')
         with self.db:
+            # Upgraded databases enforce uniqueness only for active role holders.
+            # Recreating legacy indexes here would reject archived replacements
+            # before the versioned tracker gets a chance to run its migration.
+            if 'archived' not in {r['name'] for r in self.rows('PRAGMA table_info(members)')}:
+                self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_tpm ON members(team_id) WHERE role='TPM'")
+                self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_qa_slot ON members(team_id,qa_slot) WHERE role='QA'")
             if 'author_jira' not in {r['name'] for r in self.rows('PRAGMA table_info(manual_comments)')}:
                 self.db.execute('ALTER TABLE manual_comments ADD COLUMN author_jira TEXT')
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('monthly_target','16')")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('followup_days','3')")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('followup_initial','2')")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES('followup_daily','1')")
+            self.db.execute("INSERT OR IGNORE INTO settings VALUES('critical_days','2')")
+            self.db.execute("INSERT OR IGNORE INTO settings VALUES('critical_reward','1')")
             self.db.executemany('INSERT OR IGNORE INTO countries VALUES(?,?,?,?)', [
                 ('JO', 'Jordan', '[4,5]', 'Asia/Amman'),
                 ('DO', 'Dominican Republic', '[5,6]', 'America/Santo_Domingo'),
@@ -147,10 +154,10 @@ class Tracker:
         return {r['key']: float(r['value']) for r in self.rows('SELECT * FROM settings')}
 
     def update_settings(self, data):
-        allowed = {'monthly_target', 'followup_days', 'followup_initial', 'followup_daily'}
+        allowed = {'monthly_target', 'followup_days', 'followup_initial', 'followup_daily', 'critical_days', 'critical_reward'}
         with self.db:
             for k, v in data.items():
-                if k not in allowed or not math.isfinite(float(v)) or float(v) < 0 or (k in {'monthly_target', 'followup_days'} and float(v) == 0):
+                if k not in allowed or not math.isfinite(float(v)) or float(v) < 0 or (k in {'monthly_target', 'followup_days', 'critical_days'} and float(v) == 0):
                     raise ValueError('Invalid setting')
                 self.db.execute('UPDATE settings SET value=? WHERE key=?', (str(float(v)), k))
             self.audit('settings', data)
@@ -287,7 +294,7 @@ class Tracker:
         folder = self.path.parent / 'backups'
         folder.mkdir(exist_ok=True)
         dest = folder / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.sqlite3')
-        with sqlite3.connect(dest) as db:
+        with closing(sqlite3.connect(dest)) as db:
             self.db.backup(db)
         for old in sorted(folder.glob('*.sqlite3'))[:-30]:
             old.unlink()
@@ -358,12 +365,19 @@ class Tracker:
         return {'current': previous, 'events': events, 'comments': sorted(comments, key=lambda x: x['at'] or ''), 'observations': [{**o, 'payload': json.loads(o['payload'])} for o in observations]}
 
     def add_comment(self, data):
-        ticket = self.ticket(data['ticket_key'])['current']
+        detail = self.ticket(data['ticket_key'])
+        at = timestamp(data['occurred_at'])
+        ticket = detail['current']
         member = self.rows('SELECT * FROM members WHERE id=?', (data['author_id'],))
+        if hasattr(self,'members_at') and at:
+            observed=[o for o in detail['observations'] if o['observed_at']<=at]
+            if not observed:
+                raise ValueError('Comment predates available ownership evidence')
+            ticket=observed[-1]['payload']
+            member=[m for m in self.members_at(at) if m['id']==int(data['author_id'])]
         if not member or member[0]['id'] != ticket['member_id'] and not (member[0]['role'] == 'TPM' and member[0]['team_id'] == ticket['team_id']):
             raise ValueError('Choose this ticket’s developer or team TPM')
         body = str(data['body']).strip()
-        at = timestamp(data['occurred_at'])
         if not body or not at or at > now():
             raise ValueError('Enter a comment and a valid past timestamp')
         with self.db:
@@ -400,9 +414,16 @@ class Tracker:
                     critical=self.is_critical(p['severity']) if hasattr(self,'is_critical') else p['severity'].casefold()=='critical'
                     if critical and not critical_at:
                         warnings.append(f'{key}: Critical reward needs an evidenced marked-Critical timestamp')
-                    if critical and critical_at and critical_at <= completed and self.work(critical_at, completed, dev['country']) <= policy.get('critical_days',2):
+                    reward_country=dev['country']
+                    if critical_at and hasattr(self,'members_at'):
+                        earlier=[o for o in obs if o['observed_at']<=critical_at]
+                        critical_dev_id=earlier[-1]['payload']['member_id'] if earlier else dev['id']
+                        critical_owner=next((m for m in self.members_at(critical_at) if m['id']==critical_dev_id and m['role']=='Dev'),None)
+                        if critical_owner:
+                            reward_country=critical_owner['country']
+                    if critical and critical_at and critical_at <= completed and self.work(critical_at, completed, reward_country) <= policy.get('critical_days',2):
                         owners = historical or [m for m in members if m['id'] == dev['id'] or m['team_id'] == p['team_id'] and m['role'] in ('QA', 'TPM')]
-                        score_events.extend({'key': key, 'member_id': m['id'], 'at': completed, 'points': policy.get('critical_reward',1), 'reason': 'Critical completed within configured working-day window'} for m in owners)
+                        score_events.extend({'key': key, 'member_id': m['id'], 'at': completed, 'points': policy.get('critical_reward',1), 'reason': f'Critical completed within configured working-day window ({reward_country} calendar at marked-Critical time)'} for m in owners)
                 else:
                     warnings.append(f'{key}: Done credit needs developer, SP, and evidenced completion time')
             # Status episodes are inferred from consecutive snapshots; exact transition history is not fabricated.
@@ -427,7 +448,8 @@ class Tracker:
                     owners = [m for m in owners if m['role'] != 'Dev']
                 if hasattr(self,'workflow_at'):
                     allowed = json.loads(self.workflow_at(p['status'])['roles'])
-                    owners = [m for m in (historical or members) if m['role'] in allowed and (m['id']==dev['id'] or m['team_id']==p['team_id'] and m['role']!='Dev')]
+                    roster = historical if 'owners' in p else members
+                    owners = [m for m in roster if m['role'] in allowed and (m['id']==dev['id'] or m['team_id']==p['team_id'] and m['role']!='Dev')]
                 if paused(p['status']):
                     if hasattr(self,'followup_history'):
                         if i and paused(episodes[i-1]['p']['status']):

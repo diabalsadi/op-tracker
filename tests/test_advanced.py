@@ -149,5 +149,189 @@ class HistoricalTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.t.save('sprints',{'name':'Bad','start_date':'2026-08-20','end_date':'2026-08-01'})
         with self.assertRaises(ValueError):self.t.finalize({'month':'2099-01','reason':'Not allowed'})
 
+    def test_reopen_after_archived_role_replacement(self):
+        for role, slot in [('TPM', None), ('QA', 'Primary')]:
+            original = self.t.save('members', {'name':role, 'jira_id':role, 'role':role,
+                'qa_slot':slot, 'country':'JO', 'team_id':self.a, 'effective_at':'2026-07-01'})
+            self.t.archive({'resource':'members', 'id':original, 'effective_at':'2026-08-01'})
+            self.t.save('members', {'name':role+' replacement', 'jira_id':role+'-new', 'role':role,
+                'qa_slot':slot, 'country':'JO', 'team_id':self.a, 'effective_at':'2026-08-02'})
+        reopened = Tracker(self.t.path)
+        self.assertEqual(len(reopened.members_at('2026-09-01T00:00:00+00:00')), 3)
+        reopened.db.close()
+
+    def test_finalized_report_keeps_membership_after_backdated_archive(self):
+        self.t.import_csv(export('Done', resolved='2026-08-20T09:00:00Z'), 'done.csv', '2026-08-21')
+        self.t.finalize({'month':'2026-08', 'reason':'Close month'})
+        before = self.t.report('2026-08-01', '2026-08-31')
+        self.t.archive({'resource':'members', 'id':self.dev, 'effective_at':'2026-08-01'})
+        after = self.t.report('2026-08-01', '2026-08-31')
+        self.assertEqual(after['sp'], before['sp'])
+        self.assertEqual(after['target'], before['target'])
+        self.assertEqual(after['score'], before['score'])
+        self.assertTrue(self.t.state()['pending_revisions'])
+        self.t.finalize({'month':'2026-08', 'reason':'Approve inactive month', 'revise':True})
+        self.assertEqual(self.t.report('2026-08-01', '2026-08-31')['members'], [])
+
+    def test_revision_flags_changed_evidence_even_when_totals_match(self):
+        self.t.import_csv(export('Done', resolved='2026-08-20T09:00:00Z'), 'done.csv', '2026-08-21')
+        self.t.finalize({'month':'2026-08', 'reason':'Close month'})
+        self.t.correct({'ticket_key':'OP-1', 'effective_at':'2026-08-01',
+            'patch':{'resolved':'2026-08-21T09:00:00Z'}, 'reason':'Correct completion day'})
+        self.assertTrue(self.t.state()['pending_revisions'])
+
+    def test_correction_applies_without_another_import(self):
+        self.t.import_csv(export('In Progress'), 'active.csv', '2026-08-01')
+        self.t.correct({'ticket_key':'OP-1', 'effective_at':'2026-08-03',
+            'patch':{'sp':8}, 'reason':'Repair estimate'})
+        self.assertEqual(self.t.state('2026-08-02')['tickets'][0]['sp'], 5)
+        current=self.t.state('2026-08-04')['tickets'][0]
+        self.assertEqual(current['sp'], 8)
+        self.assertEqual(current['last_seen'], '2026-08-01T00:00:00+00:00')
+        self.assertEqual(len(self.t.rows('SELECT * FROM observations')), 1)
+
+    def test_corrupt_backup_preserves_active_database(self):
+        folder=self.t.path.parent/'backups'
+        folder.mkdir(exist_ok=True)
+        (folder/'broken.sqlite3').write_bytes(b'not a database')
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.t.restore({'filename':'broken.sqlite3'})
+        self.assertEqual(self.t.rows('PRAGMA integrity_check')[0]['integrity_check'], 'ok')
+        self.assertEqual(len(self.t.rows('SELECT * FROM teams')), 2)
+
+    def test_invalid_backup_schema_is_rejected_before_replacement(self):
+        folder=self.t.path.parent/'backups'
+        folder.mkdir(exist_ok=True)
+        invalid=sqlite3.connect(folder/'invalid.sqlite3')
+        try:
+            invalid.executescript('CREATE TABLE members(id); CREATE TABLE observations(id); CREATE TABLE imports(id);')
+        finally:
+            invalid.close()
+        with self.assertRaises(ValueError):
+            self.t.restore({'filename':'invalid.sqlite3'})
+        self.assertEqual(len(self.t.rows('SELECT * FROM teams')),2)
+        self.assertEqual(len(self.t.rows('SELECT * FROM members')),1)
+
+    def test_backup_retention_and_unicode_paths(self):
+        folder=Path(self.folder.name)/'مسار with spaces'
+        other=Tracker(folder/'tracker.sqlite3')
+        try:
+            other.save('teams', {'name':'فريق العمليات'})
+            for _ in range(32):
+                other.backup()
+            self.assertEqual(len(other.backups()), 30)
+            other.restore({'filename':other.backups()[-1]['filename']})
+            self.assertEqual(other.rows('SELECT name FROM teams')[0]['name'], 'فريق العمليات')
+        finally:
+            other.db.close()
+
+    def test_policy_change_during_followup_is_prospective(self):
+        self.t.import_csv(export('Blocked'), 'blocked.csv', '2026-08-02T00:00:00Z')
+        self.t.update_settings({'followup_initial':7, 'followup_daily':4,
+            'effective_at':'2026-08-03T00:00:00Z'})
+        events=self.t.state('2026-08-06T12:00:00Z')['score_events']
+        self.assertEqual([e['points'] for e in events], [-7, -4])
+        self.assertTrue(all(e['at']>'2026-08-03T00:00:00+00:00' for e in events))
+
+    def test_archived_owner_is_not_charged_without_new_import(self):
+        self.t.save('rules', {'status':'In Progress','severity':'High','sp':5,
+            'days':1,'initial':2,'daily':1,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('In Progress'), 'active.csv', '2026-08-02')
+        self.t.archive({'resource':'members','id':self.dev,'effective_at':'2026-08-03'})
+        events=self.t.state('2026-08-10')['score_events']
+        self.assertFalse(any(e['at']>='2026-08-03T00:00:00+00:00' for e in events))
+
+    def test_role_change_has_no_tpm_utilization_target(self):
+        self.t.save('members', {'id':self.dev,'name':'Former developer','jira_id':'dev-a',
+            'role':'TPM','country':'JO','team_id':self.a,'effective_at':'2026-08-16'})
+        result=self.t.report('2026-08-01','2026-08-31',role='TPM')
+        self.assertEqual(result['target'],0)
+        self.assertIsNone(result['members'][0]['util'])
+        self.assertEqual(result['members'][0]['score'],100)
+
+    def test_normal_penalty_exact_boundary_and_handover_no_duplicates(self):
+        self.t.save('rules', {'status':'In Progress','severity':'High','sp':5,
+            'days':1,'initial':2,'daily':1,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('In Progress'), 'active.csv', '2026-08-02T09:00:00Z')
+        self.assertEqual(self.t.state('2026-08-03T09:00:00Z')['score_events'],[])
+        early=self.t.state('2026-08-03T09:00:01Z')['score_events']
+        self.assertEqual([e['points'] for e in early],[-2])
+        self.t.save('members', {'id':self.dev,'name':'Dev A','jira_id':'dev-a',
+            'role':'Dev','country':'JO','team_id':self.b,'effective_at':'2026-08-04T09:00:00Z'})
+        events=self.t.state('2026-08-05T10:00:00Z')['score_events']
+        self.assertEqual([e['points'] for e in events],[-2,-1,-1])
+        self.assertEqual(len({(e['member_id'],e['at']) for e in events}),len(events))
+
+    def test_late_manual_followup_uses_historical_author(self):
+        first=self.t.save('members',{'name':'Previous TPM','jira_id':'previous', 'role':'TPM',
+            'country':'DO','team_id':self.a,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('Blocked'),'blocked.csv','2026-08-02')
+        self.t.archive({'resource':'members','id':first,'effective_at':'2026-08-05'})
+        self.t.add_comment({'ticket_key':'OP-1','author_id':first,'body':'Historical follow-up',
+            'occurred_at':'2026-08-04T12:00:00Z'})
+        self.assertEqual(self.t.ticket('OP-1')['comments'][0]['author'],'previous')
+        with self.assertRaises(ValueError):
+            self.t.add_comment({'ticket_key':'OP-1','author_id':first,'body':'After leaving',
+                'occurred_at':'2026-08-06T12:00:00Z'})
+
+    def test_monthly_bonus_and_inactive_months(self):
+        raw=export('Done',resolved='2026-08-20T09:00:00Z').replace(',5,High,',',20,High,')
+        self.t.import_csv(raw,'done.csv','2026-08-21')
+        self.assertEqual(self.t.monthly(self.dev,'2026-08')['score'],110)
+        self.t.archive({'resource':'members','id':self.dev,'effective_at':'2026-09-01'})
+        report=self.t.report('2026-08-01','2026-09-30')
+        self.assertEqual(report['members'][0]['score'],110)
+        self.assertEqual(len(report['members'][0]['months']),1)
+
+    def test_critical_reward_requires_evidence_and_stays_separate_from_sp(self):
+        self.t.import_csv(export('Done', resolved='2026-08-20T09:00:00Z',severity='Critical'),
+            'done.csv','2026-08-21')
+        self.assertEqual(self.t.state()['score_events'],[])
+        self.t.correct({'ticket_key':'OP-1','effective_at':'2026-08-01',
+            'patch':{'critical_at':'2026-08-19T09:00:00Z'},'reason':'Verified history'})
+        month=self.t.monthly(self.dev,'2026-08')
+        self.assertEqual(month['critical'],1)
+        self.assertEqual(month['sp'],5)
+
+    def test_critical_reward_uses_calendar_when_marked_critical(self):
+        self.t.update_settings({'critical_days':1,'critical_reward':2,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('In Progress',severity='Critical',critical='2026-10-22T12:00:00Z'),
+            'critical.csv','2026-10-22T12:00:00Z')
+        self.t.save('members',{'id':self.dev,'name':'Dev A','jira_id':'dev-a','role':'Dev',
+            'country':'DO','team_id':self.a,'effective_at':'2026-10-23'})
+        self.t.import_csv(export('Done',severity='Critical',critical='2026-10-22T12:00:00Z',resolved='2026-10-25T12:00:00Z'),
+            'done.csv','2026-10-25T12:00:00Z')
+        events=self.t.state('2026-10-26')['score_events']
+        self.assertEqual([e['points'] for e in events],[2])
+        self.assertIn('JO calendar',events[0]['reason'])
+
+    def test_larger_csv_and_roster_keep_all_sources(self):
+        for index in range(31):
+            self.t.save('members',{'name':'اسم طويل للاختبار '*6+str(index),
+                'jira_id':f'bulk-{index}','role':'Dev','country':'AM','team_id':self.a,'effective_at':'2026-07-01'})
+        output=io.StringIO();writer=csv.writer(output)
+        writer.writerow(['Issue key','Summary','Status','Assignee Id','Story Points','Priority','Resolved'])
+        for index in range(1000):
+            writer.writerow([f'BULK-{index+1}','اختبار استيراد','Done',f'bulk-{index%31}',1,'High','2026-08-20T09:00:00Z'])
+        raw=output.getvalue()
+        self.assertEqual(self.t.import_csv(raw,'bulk.csv','2026-08-21',preview=True)['count'],1000)
+        self.assertEqual(self.t.rows('SELECT * FROM imports'),[])
+        self.t.import_csv(raw,'bulk.csv','2026-08-21')
+        report=self.t.report('2026-08-01','2026-08-31')
+        self.assertEqual(report['sp'],1000)
+        self.assertEqual(report['target'],512)
+        self.assertEqual(self.t.rows('SELECT raw FROM imports')[0]['raw'],raw)
+
+    def test_mid_status_rule_change_keeps_earlier_penalties(self):
+        identity=self.t.save('rules',{'status':'In Progress','severity':'High','sp':5,
+            'days':1,'initial':2,'daily':1,'effective_at':'2026-07-01'})
+        self.t.import_csv(export('In Progress'),'active.csv','2026-08-02T09:00:00Z')
+        before=self.t.state('2026-08-04T08:00:00Z')['score_events']
+        self.t.save('rules',{'id':identity,'status':'In Progress','severity':'High','sp':5,
+            'days':1,'initial':7,'daily':4,'effective_at':'2026-08-04T08:00:00Z'})
+        events=self.t.state('2026-08-05T10:00:00Z')['score_events']
+        self.assertEqual(events[:len(before)],before)
+        self.assertEqual([e['points'] for e in events],[-2,-4,-4])
+
 
 if __name__=='__main__':unittest.main()

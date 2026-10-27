@@ -5,6 +5,7 @@ import json
 import math
 import sqlite3
 import copy
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -289,6 +290,13 @@ class Tracker(BaseTracker):
         result=super().ticket(key)
         for c in self.rows('SELECT * FROM corrections WHERE ticket_key=? ORDER BY effective_at,id',(key,)):
             patch=json.loads(c['patch'])
+            # Evidence repairs take effect even when no newer CSV exists.
+            prior=[o for o in result['observations'] if o['observed_at']<c['effective_at']]
+            if prior and c['effective_at']<=now() and not any(o['observed_at']==c['effective_at'] for o in result['observations']):
+                source=max(prior,key=lambda o:o['observed_at'])
+                result['observations'].append({'id':-c['id'],'ticket_key':key,'import_id':None,
+                    'observed_at':c['effective_at'],'payload':copy.deepcopy(source['payload']),'virtual':True})
+                result['observations'].sort(key=lambda o:o['observed_at'])
             for obs in result['observations']:
                 if obs['observed_at']>=c['effective_at']:
                     obs['payload'].update(patch)
@@ -337,11 +345,19 @@ class Tracker(BaseTracker):
                 qualified.append(at)
         resets=sorted(set(qualified))
         for a,b in zip([start]+resets,resets+[end]):
-            policy=self.policy_at(a);threshold=policy['followup_days'];elapsed=0.0;n=0
+            elapsed=0.0;n=0
+            slices=[]
             for segment in segments:
+                low=max(a,segment['start']);high=min(b,segment['end'])
+                boundaries=[r['effective_at'] for r in self.rows(
+                    'SELECT effective_at FROM policy_versions WHERE effective_at>? AND effective_at<? ORDER BY effective_at',(low,high))]
+                slices.extend({**segment,'start':x,'end':y} for x,y in zip([low]+boundaries,boundaries+[high]) if x<y)
+            for segment in slices:
                 low=max(a,segment['start']);high=min(b,segment['end'])
                 if low>=high:
                     continue
+                policy=self.policy_at(low)
+                threshold=policy['followup_days']+n
                 from zoneinfo import ZoneInfo
                 tz=ZoneInfo('Asia/Amman')
                 first=datetime.fromisoformat(low).astimezone(tz);last=datetime.fromisoformat(high).astimezone(tz);day=first.date()
@@ -399,7 +415,10 @@ class Tracker(BaseTracker):
         result['pending_revisions']=[]
         for record in self.rows('SELECT * FROM monthly_records WHERE id IN (SELECT max(id) FROM monthly_records GROUP BY member_id,month)'):
             frozen=json.loads(record['payload']);live=self.monthly(record['member_id'],record['month'],result)
-            if any(round(float(frozen.get(k) or 0),6)!=round(float(live.get(k) or 0),6) for k in ('sp','target','score','critical','penalties')):
+            totals_changed = any(round(float(frozen.get(k) or 0),6)!=round(float(live.get(k) or 0),6) for k in ('sp','target','score','critical','penalties'))
+            evidence_changed = any(json.dumps(frozen.get(k), sort_keys=True) != json.dumps(live.get(k), sort_keys=True)
+                                   for k in ('eligible','credits','events','membership_segments'))
+            if totals_changed or evidence_changed:
                 result['pending_revisions'].append({'member_id':record['member_id'],'month':record['month'],'revision':record['revision']})
                 result['warnings'].append(f'Monthly record {record["month"]} for member {record["member_id"]}: new evidence or configuration differs; finalized revision {record["revision"]} retained')
         if result['imports']:
@@ -416,17 +435,34 @@ class Tracker(BaseTracker):
         path=self.path.parent/'backups'/name
         if not path.is_file():
             raise ValueError('Backup not found')
-        source=sqlite3.connect(f'file:{path}?mode=ro',uri=True)
-        try:
-            if source.execute('PRAGMA integrity_check').fetchone()[0]!='ok':
-                raise ValueError('Backup integrity check failed')
-            if not {'members','observations','imports'} <= {r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
-                raise ValueError('This is not an OP Tracker backup')
-            self.backup()
-            source.backup(self.db)
-            self._day_cache={};self._work_cache={}
-        finally:
-            source.close()
+        # Validate and migrate an isolated copy before touching the active dataset.
+        # Close the selected file before retention runs (important on Windows).
+        with tempfile.TemporaryDirectory(prefix='op-tracker-restore-') as folder:
+            source=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+            staged_path=Path(folder)/'tracker.sqlite3'
+            try:
+                if source.execute('PRAGMA integrity_check').fetchone()[0]!='ok':
+                    raise ValueError('Backup integrity check failed')
+                required={'members','teams','countries','holidays','settings','rules','observations','imports','manual_comments','audit'}
+                if not required <= {r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+                    raise ValueError('This is not an OP Tracker backup')
+                staged_db=sqlite3.connect(staged_path)
+                try:
+                    source.backup(staged_db)
+                finally:
+                    staged_db.close()
+            finally:
+                source.close()
+            staged=type(self)(staged_path)
+            try:
+                if staged.rows('PRAGMA foreign_key_check'):
+                    raise ValueError('Backup contains invalid references')
+                staged.state()
+                self.backup()
+                staged.db.backup(self.db)
+                self._day_cache={};self._work_cache={}
+            finally:
+                staged.db.close()
         with self.db:
             self.audit('restore',{'filename':name})
 
@@ -491,9 +527,9 @@ class Tracker(BaseTracker):
         with self.db:
             for m in state['members']:
                 value=self.monthly(m['id'],month,state)
-                if not value['eligible']:
-                    continue
                 previous=self.rows('SELECT * FROM monthly_records WHERE member_id=? AND month=? ORDER BY revision DESC LIMIT 1',(m['id'],month))
+                if not value['eligible'] and not (previous and data.get('revise')):
+                    continue
                 if previous and not data.get('revise'):
                     continue
                 revision=previous[0]['revision']+1 if previous else 1
@@ -533,10 +569,8 @@ class Tracker(BaseTracker):
         state=self.state()
         rows=[]
         for member in state['members']:
-            segments=[(x,y,m) for x,y,m in self._history_segments(member['id'],start,end) if (not team_id or m['team_id']==int(team_id)) and (not country or m['country']==country) and (not role or m['role']==role)]
-            if not segments:
-                continue
             monthly=[]
+            segments=[]
             for month in months:
                 record=self.rows('SELECT * FROM monthly_records WHERE member_id=? AND month=? ORDER BY revision DESC LIMIT 1',(member['id'],month))
                 if record and not live:
@@ -545,8 +579,14 @@ class Tracker(BaseTracker):
                         v['record_status']='Finalized · Revision available'
                 else:
                     v=self.monthly(member['id'],month,state);v['record_status']='Provisional' if month==date.today().isoformat()[:7] else 'Unfinalized'
-                if v['eligible']:
+                matching=[(max(x,start),min(y,end),m) for x,y,m in v['membership_segments']
+                          if x<end and y>start and (not team_id or m['team_id']==int(team_id))
+                          and (not country or m['country']==country) and (not role or m['role']==role)]
+                if v['eligible'] and matching:
                     monthly.append(v)
+                    segments.extend(matching)
+            if not segments:
+                continue
             credits=[c for v in monthly for c in v['credits'] if start<=c['at']<end and (not team_id or c['team_id']==int(team_id)) and any(x<=c['at']<y for x,y,m in segments if m['role']=='Dev')]
             target=0.0
             for v in monthly:
@@ -555,7 +595,8 @@ class Tracker(BaseTracker):
                 else:
                     month_start=v['month']+'-01T00:00:00+00:00'
                     month_next=(date.fromisoformat(v['month']+'-01').replace(day=28)+timedelta(days=4)).replace(day=1).isoformat()+'T00:00:00+00:00'
-                    target+=self.target(member['id'],max(start,month_start),min(end,month_next),team_id,country)
+                    if not role or role=='Dev':
+                        target+=self.target(member['id'],max(start,month_start),min(end,month_next),team_id,country)
             points=sum(c['sp'] for c in credits)
             last=segments[-1][2]
             rows.append({**last,'id':member['id'],'sp':points,'target':target,'util':points/target*100 if target>0 else None,
