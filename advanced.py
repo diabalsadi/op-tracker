@@ -677,8 +677,10 @@ class Tracker(BaseTracker):
         state=state or self.state()
         segments=list(self._history_segments(member_id,start,end))
         target=self.target(member_id,start,end)
-        credits=[c for c in state['credits'] if c['member_id']==member_id and start<=c['at']<end]
-        events=[e for e in state['score_events'] if e['member_id']==member_id and start<=e['at']<end]
+        credits=[c for c in state['credits'] if c['member_id']==member_id and start<=c['at']<end
+                 and any(a<=c['at']<b and m['role']=='Dev' and in_team(m,c['team_id']) for a,b,m in segments)]
+        events=[e for e in state['score_events'] if e['member_id']==member_id and start<=e['at']<end
+                and any(a<=e['at']<b for a,b,m in segments)]
         sp=sum(c['sp'] for c in credits)
         utilization=sp/target*100 if target>0 else None
         bonus=10*math.floor(max(0,(utilization or 0)-100)/20+1e-9)

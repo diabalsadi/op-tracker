@@ -49,6 +49,17 @@ class HistoricalTests(unittest.TestCase):
         self.assertLess(assessed['score'],100)
         self.assertIsNone(self.t.monthly(self.dev,'2026-07',enough)['score'])
 
+    def test_delivery_before_membership_cannot_generate_monthly_bonus(self):
+        late=self.t.save('members',dict(name='Late Dev',jira_id='late-dev',role='Dev',country='JO',team_id=self.a,effective_at='2026-10-27'))
+        self.t.import_csv(export('Closed',resolved='2026-10-10T09:00:00Z',assignee='late-dev'),'closed.csv','2026-10-27T12:00:00Z')
+        state=self.t.state('2026-10-27T13:00:00Z')
+        monthly=self.t.monthly(late,'2026-10',state)
+        report=next(m for m in self.t.report('2026-10-01','2026-10-27',_state=state)['members'] if m['id']==late)
+        self.assertEqual(monthly['sp'],0)
+        self.assertEqual(monthly['bonus'],0)
+        self.assertIsNone(monthly['score'])
+        self.assertEqual(report['sp'],monthly['sp'])
+
     def test_membership_prorates_transfer_and_quarter(self):
         q=self.t.report('2026-07-01','2026-09-30')
         self.assertAlmostEqual(q['target'],48)
