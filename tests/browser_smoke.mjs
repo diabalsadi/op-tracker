@@ -333,6 +333,27 @@ try {
   const databaseBytes=fs.readFileSync(await databaseDownload.path());
   if(databaseBytes.subarray(0,16).toString()!=='SQLite format 3\0')throw Error('Database export was not SQLite');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Members"]').click();
+  await page.locator('#members-results').waitFor();
+  const sortRequests=apiRequests.length;
+  for(const [key,column] of [['sp',3],['util',4],['score',5]]){
+    for(const direction of ['descending','ascending']){
+      await page.locator(`[data-member-sort="${key}"]`).click();
+      await page.locator(`th[aria-sort="${direction}"] [data-member-sort="${key}"]`).waitFor();
+      const values=await page.locator('#members-results tbody tr').evaluateAll((rows,column)=>rows.map(row=>{const text=row.cells[column]?.textContent.trim();return text==='N/A'||text==='Not yet assessed'?null:parseFloat(text);}),column);
+      let sawMissing=false,previous=null;
+      for(const value of values){
+        if(value===null){sawMissing=true;continue;}
+        if(!Number.isFinite(value)||sawMissing||previous!==null&&(direction==='descending'?previous<value:previous>value))throw Error('Members sort failed: '+key+' '+direction+' '+JSON.stringify(values));
+        previous=value;
+      }
+    }
+  }
+  if(apiRequests.length!==sortRequests)throw Error('Members sorting triggered recalculation');
+  await page.locator('[data-member-sort="sp"]').focus();await page.keyboard.press('Enter');
+  await page.locator('th[aria-sort="descending"] [data-member-sort="sp"]').waitFor();
+  await scan('Sortable Members table');
+  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}
   const contrast=await page.locator('.value').first().evaluate(el=>({color:getComputedStyle(el).color,font:getComputedStyle(el).fontSize}));

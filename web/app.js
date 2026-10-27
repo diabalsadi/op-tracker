@@ -9,6 +9,7 @@ let adminMemberFilters={query:'',role:'',team:'',country:''};
 let state, page = 'Overview', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
 let peopleSearch='',peoplePosition='';
+let memberSort={key:null,direction:'desc'};
 let profileTicketStatus = '';
 let charts = [], profileId = null, profileYear = today.getFullYear(), profileMonth = today.getMonth(), ticketKey = null;
 let stateDirty=false;
@@ -79,7 +80,21 @@ function metric(m,month=null) {
   return reportData?.members.find(r=>r.id===m.id) || {sp:0,util:null,score:null,target:0,months:[]};
 }
 function table(headers, rows) { return `<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('') || `<tr><td colspan="${headers.length}" class="empty">No records for this selection.</td></tr>`}</tbody></table></div>`; }
-function memberTable(ms) { return table(['Member','Role / team','Country','Done SP','Utilization','Score'],ms.map(m=>{const v=metric(m);return `<tr><td>${link(m.name,`data-person="${m.id}"`)}</td><td>${esc(m.role)} · ${esc(memberTeams(m))}</td><td>${esc(countryName(m.country))}</td><td>${v.target>0?fmt(v.sp):'N/A'}</td><td>${v.util===null?'N/A':fmt(v.util)+'%'}</td><td>${scoreLabel(v.score)}</td></tr>`;})); }
+function memberTable(ms,sortable=false) {
+  const value=(m,key)=>{const v=metric(m);return key==='sp'&&!(v.target>0)?null:v[key];};
+  if(sortable&&memberSort.key)ms=[...ms].sort((a,b)=>{
+    const x=value(a,memberSort.key),y=value(b,memberSort.key);
+    if(x===null||x===undefined)return y===null||y===undefined?a.name.localeCompare(b.name):1;
+    if(y===null||y===undefined)return -1;
+    return (memberSort.direction==='asc'?x-y:y-x)||a.name.localeCompare(b.name);
+  });
+  let html=table(['Member','Role / team','Country','Done SP','Utilization','Score'],ms.map(m=>{const v=metric(m);return `<tr><td>${link(m.name,`data-person="${m.id}"`)}</td><td>${esc(m.role)} · ${esc(memberTeams(m))}</td><td>${esc(countryName(m.country))}</td><td>${v.target>0?fmt(v.sp):'N/A'}</td><td>${v.util===null?'N/A':fmt(v.util)+'%'}</td><td>${scoreLabel(v.score)}</td></tr>`;}));
+  if(sortable)for(const [key,label] of [['sp','Done SP'],['util','Utilization'],['score','Score']]){
+    const active=memberSort.key===key,direction=active?memberSort.direction:null;
+    html=html.replace(`<th>${label}</th>`,`<th aria-sort="${direction==='asc'?'ascending':direction==='desc'?'descending':'none'}"><button type="button" class="link" data-member-sort="${key}" aria-label="Sort by ${label}${active?', '+(direction==='desc'?'highest':'lowest')+' first':''}">${label} ${active?(direction==='desc'?'↓':'↑'):'↕'}</button></th>`);
+  }
+  return html;
+}
 function ticketsTable(ts) { return table(['Ticket','Summary','Status','Owner','SP','Last seen'],ts.map(t=>`<tr><td>${link(t.key,`data-ticket="${esc(t.key)}"`)}</td><td>${esc(t.summary)}</td><td><span class="badge ${['blocked','on hold'].includes(t.status.toLowerCase())?'warning':''}">${esc(t.status)}</span></td><td>${esc(memberName(t.member_id))}</td><td>${fmt(t.sp)}</td><td>${dateLabel(t.last_seen)}</td></tr>`)); }
 function chartBox(id,title,note='Hover for values. Click a legend item to toggle its series.') { return panel(title,`<div class="chart"><canvas id="${id}" role="img" aria-label="${esc(title)}; values are available in the accompanying tables."></canvas></div><p class="chart-note">${note}</p>`); }
 function draw(id,type,labels,datasets,yTitle,click,xTitle='Month') {
@@ -118,7 +133,7 @@ async function render() {
     const utilization=page==='Utilization';draw('util-chart','bar',dev.map(m=>m.name),[series(utilization?'Utilization (%)':'Done SP',dev.map(m=>utilization?metric(m).util:metric(m).sp)),{...series('Target',dev.map(m=>utilization?100:rangeTarget(m)),'#cad8d0','line'),borderDash:[5,5]}],utilization?'Utilization (%)':'Story points',i=>profile(dev[i].id),'Developer');
   }
   if(page==='Performance')renderPerformance();
-  if(page==='Members')content.innerHTML=panel('Team members',memberTable(ms))+`<button class="primary" data-admin="Members">Manage members & assignments</button>`;
+  if(page==='Members')content.innerHTML=panel('Team members',`<div id="members-results">${memberTable(ms,true)}</div>`)+`<button class="primary" data-admin="Members">Manage members & assignments</button>`;
   if(page==='Tickets')content.innerHTML=panel('Ticket explorer',ticketsTable(ts));
   if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));
   if(page==='Delivery')renderDurations();
@@ -266,6 +281,7 @@ function renderAdmin() {
 }
 function object(form){const d=Object.fromEntries(new FormData(form));if(d.id==='')delete d.id;return d;}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try {
+  if(b.dataset.memberSort&&page==='Members'){const key=b.dataset.memberSort;memberSort={key,direction:memberSort.key===key&&memberSort.direction==='desc'?'asc':'desc'};$('#members-results').innerHTML=memberTable(getMembers(),true);$('#members-results [data-member-sort="'+key+'"]').focus();return;}
   if(b.id==='recalculate'){const person=profileId,ticketId=ticketKey;b.disabled=true;announce('Recalculating live results…');state=await api('recalculate',{});stateDirty=false;updateDataStatus();if(person!==null)await profile(person);else if(ticketId)await ticket(ticketId);else if(page==='Administration')renderAdminMemberDirectory();else await render();announce('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.');b.disabled=false;}
   if(b.id==='clear-people-filters'){peopleSearch='';peoplePosition='';$('#people-search').value='';$('#people-position').value='';updatePeopleFilters();}
   if(b.id==='clear-admin-member-filters'){adminMemberFilters={query:'',role:'',team:'',country:''};for(const id of ['search','role','team','country'])$('#admin-member-'+id).value='';renderAdminMemberDirectory();}
