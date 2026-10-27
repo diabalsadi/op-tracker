@@ -35,6 +35,20 @@ class HistoricalTests(unittest.TestCase):
         frozen=self.t.report('2026-08-01','2026-08-31',self.a)['members'][0]['review_events']
         self.assertEqual(frozen,events)
 
+    def test_unassessed_scores_do_not_become_perfect_baselines(self):
+        self.assertIsNone(self.t.report('2026-08-01','2026-08-31')['members'][0]['score'])
+        self.t.save('rules', dict(status='In Progress',severity='High',sp=5,days=1,initial=2,daily=1,calendar='mon_fri',effective_at='2026-07-01'))
+        self.t.import_csv(export(), 'first.csv', '2026-08-03T00:00:00Z')
+        short=self.t.state('2026-08-03T01:00:00Z')
+        self.assertIsNone(self.t.monthly(self.dev,'2026-08',short)['score'])
+        boundary=self.t.state('2026-08-04T00:00:00Z')
+        self.assertEqual(self.t.monthly(self.dev,'2026-08',boundary)['score'],100)
+        enough=self.t.state('2026-08-05T00:00:00Z')
+        assessed=self.t.monthly(self.dev,'2026-08',enough)
+        self.assertTrue(assessed['assessed'])
+        self.assertLess(assessed['score'],100)
+        self.assertIsNone(self.t.monthly(self.dev,'2026-07',enough)['score'])
+
     def test_membership_prorates_transfer_and_quarter(self):
         q=self.t.report('2026-07-01','2026-09-30')
         self.assertAlmostEqual(q['target'],48)
@@ -261,7 +275,8 @@ class HistoricalTests(unittest.TestCase):
         result=self.t.report('2026-08-01','2026-08-31',role='TPM')
         self.assertEqual(result['target'],0)
         self.assertIsNone(result['members'][0]['util'])
-        self.assertEqual(result['members'][0]['score'],100)
+        self.assertIsNone(result['members'][0]['score'])
+        self.assertEqual(result['members'][0]['assessment_status'],'Not yet assessed')
 
     def test_normal_penalty_exact_boundary_and_handover_no_duplicates(self):
         self.t.save('rules', {'status':'In Progress','severity':'High','sp':5,

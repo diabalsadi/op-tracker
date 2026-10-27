@@ -683,10 +683,12 @@ class Tracker(BaseTracker):
         utilization=sp/target*100 if target>0 else None
         bonus=10*math.floor(max(0,(utilization or 0)-100)/20+1e-9)
         eligible=bool(segments)
+        assessed=bool(credits or events or any(a['member_id']==member_id and start<=a['at']<end for a in state.get('assessments', [])))
         return {'member_id':member_id,'month':month,'eligible':eligible,'sp':sp,'target':target,'util':utilization,
                 'bonus':bonus,'critical':sum(e['points'] for e in events if e['points']>0),
                 'penalties':-sum(e['points'] for e in events if e['points']<0),
-                'score':100+bonus+sum(e['points'] for e in events) if eligible else None,
+                'score':100+bonus+sum(e['points'] for e in events) if eligible and assessed else None,
+                'assessed':assessed,
                 'credits':credits,'events':events,'membership_segments':[(a,b,m) for a,b,m in segments]}
 
     def finalize(self,data,_state=None):
@@ -789,7 +791,8 @@ class Tracker(BaseTracker):
                             continue
                     review_events.append(event)
             rows.append({**last,'id':member['id'],'sp':points,'target':target,'util':points/target*100 if target>0 else None,
-                         'score':sum(v['score'] for v in monthly)/len(monthly) if monthly else None,'months':monthly,
+                         'score':sum(v['score'] for v in monthly if v['score'] is not None)/sum(v['score'] is not None for v in monthly) if any(v['score'] is not None for v in monthly) else None,'months':monthly,
+                         'assessment_status':'Assessed' if any(v['score'] is not None for v in monthly) else 'Not yet assessed',
                          'review_events':review_events})
         return {'start_date':start_date,'end_date':end_date,'members':rows,'months':months,
                 'sp':sum(r['sp'] for r in rows),'target':sum(r['target'] for r in rows),

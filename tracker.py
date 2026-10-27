@@ -421,6 +421,7 @@ class Tracker:
         members = self.rows('SELECT * FROM members ORDER BY name')
         byid = {m['id']: m for m in members}
         credits, tickets, score_events, warnings = [], [], [], []
+        self._assessments = []
         settings = self.settings()
         for key in [r['ticket_key'] for r in self.rows('SELECT DISTINCT ticket_key FROM observations')]:
             detail = self.ticket(key)
@@ -530,7 +531,7 @@ class Tracker:
                     anchor = max(anchor, rule['created_at'])
                     for m in owners:
                         self.penalty_events(key, anchor, end, m, rule, score_events, pauses, start)
-        return {'members': members, 'teams': self.rows('SELECT * FROM teams ORDER BY name'), 'countries': self.rows('SELECT * FROM countries'), 'holidays': self.rows('SELECT * FROM holidays ORDER BY day'), 'rules': self.rows('SELECT * FROM rules'), 'settings': settings, 'tickets': tickets, 'credits': credits, 'score_events': score_events, 'warnings': sorted(set(warnings)), 'imports': self.rows('SELECT id,filename,snapshot_at,created_at FROM imports ORDER BY snapshot_at DESC,id DESC'), 'asof': asof, 'calculation_note': 'Live projections assume the last observed status continues. Exact transitions between exports are unknown.'}
+        return {'members': members, 'teams': self.rows('SELECT * FROM teams ORDER BY name'), 'countries': self.rows('SELECT * FROM countries'), 'holidays': self.rows('SELECT * FROM holidays ORDER BY day'), 'rules': self.rows('SELECT * FROM rules'), 'settings': settings, 'tickets': tickets, 'credits': credits, 'score_events': score_events, 'assessments': self._assessments, 'warnings': sorted(set(warnings)), 'imports': self.rows('SELECT id,filename,snapshot_at,created_at FROM imports ORDER BY snapshot_at DESC,id DESC'), 'asof': asof, 'calculation_note': 'Live projections assume the last observed status continues. Exact transitions between exports are unknown.'}
 
     def penalty_events(self, key, start, end, member, rule, events, pauses=None, effective_start=None):
         if start >= end:
@@ -540,6 +541,8 @@ class Tracker:
         def elapsed_at(at):
             return self.work(start, at, member['country'], weekend) - sum(self.work(max(start, a), min(at, b), member['country'], weekend) for a, b in (pauses or []) if max(start, a) < min(at, b))
         threshold, elapsed = rule['days'], elapsed_at(end)
+        if elapsed >= threshold and hasattr(self, '_assessments'):
+            self._assessments.append({'member_id': member['id'], 'key': key, 'at': (datetime.fromisoformat(end)-timedelta(microseconds=1)).isoformat()})
         n = 0
         while elapsed > threshold + n + 1e-9:
             low, high = datetime.fromisoformat(start), datetime.fromisoformat(end)
