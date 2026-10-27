@@ -66,6 +66,10 @@ try {
   await page.locator('#member-form input[name=jira_id]').fill('browser-user');
   await page.locator('#member-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
   await page.locator('[data-tab="Workflow rules"]').click();
+  const ruleOptions=await page.locator('#rule-form').evaluate(form=>({statuses:[...form.elements.status.options].map(o=>o.value).filter(Boolean),priorities:[...form.elements.severity.options].map(o=>o.value).filter(Boolean)}));
+  const ruleState=await (await fetch(origin+'/api/state')).json();
+  if(JSON.stringify(ruleOptions.statuses)!==JSON.stringify(ruleState.workflow.map(w=>w.name)))throw Error('Rule status dropdown differs from Workflow configuration');
+  if(JSON.stringify(ruleOptions.priorities)!==JSON.stringify(ruleState.priorities.map(p=>p.name)))throw Error('Rule severity dropdown differs from Priority configuration');
   await page.locator('#rule-form input[name=effective_at]').fill('2026-10-01T09:00');
   await page.locator('#rule-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
   await page.locator('[data-tab="Sprints"]').click();
@@ -195,6 +199,9 @@ try {
   await page.getByText('Saved to your local database.',{exact:true}).waitFor();
   const priorityState=await (await fetch(origin+'/api/state')).json();
   if(!priorityState.priorities.find(p=>p.name==='Urgent')?.critical)throw Error('Imported priority could not be configured');
+  await page.locator('[data-tab="Workflow rules"]').click();
+  await page.locator('#rule-form select[name=status]').selectOption('Design Review');
+  await page.locator('#rule-form select[name=severity]').selectOption('Urgent');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}
