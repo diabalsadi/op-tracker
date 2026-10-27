@@ -5,6 +5,7 @@ const pages = ['Overview','Delivery','Utilization','Performance','Rankings','Mem
 const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let today = new Date();
 let activePreset='month';
+let adminMemberFilters={query:'',role:'',team:'',country:''};
 let state, page = 'Overview', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
 let profileTicketStatus = '';
@@ -172,15 +173,29 @@ function updateMemberAssignmentRole() {
   $('#member-team-summary').textContent=chosen.length?chosen.map(teamName).join(', '):'Choose teams';
   document.querySelectorAll('.member-qa-slot').forEach(el=>el.hidden=role!=='QA'||!chosen.includes(Number(el.dataset.qaTeam)));
 }
+function renderAdminMemberDirectory() {
+  const container=$('#admin-member-directory');if(!container)return;
+  const normalized=value=>String(value||'').normalize('NFKC').toLocaleLowerCase();
+  const query=normalized(adminMemberFilters.query.trim());
+  const members=state.members.filter(m=>(!query||normalized(m.name).includes(query)||normalized(m.jira_id).includes(query))
+    &&(!adminMemberFilters.role||m.role===adminMemberFilters.role)
+    &&(!adminMemberFilters.team||memberInTeam(m,adminMemberFilters.team))
+    &&(!adminMemberFilters.country||m.country===adminMemberFilters.country));
+  $('#admin-member-count').textContent=`${members.length} of ${state.members.length} people`;
+  container.innerHTML=table(['Name / Jira ID','Role','Country','Teams',''],members.map(m=>`<tr><td>${esc(m.name)}<div class="muted">${esc(m.jira_id)}</div></td><td>${m.role}</td><td>${esc(countryName(m.country))}</td><td>${esc(memberTeams(m))}</td><td><button data-edit-member="${m.id}">Edit</button> ${m.archived?`<span class="badge">Archived</span> <button data-reactivate-member="${m.id}">Reactivate</button>`:`<button data-archive-member="${m.id}">Archive</button>`}</td></tr>`));
+}
+document.addEventListener('input',e=>{
+  if(e.target.id==='admin-member-search'){adminMemberFilters.query=e.target.value;renderAdminMemberDirectory();}
+});
 function renderAdmin() {
   $('#content').innerHTML=`<div class="tabs" aria-label="Administration sections">${['Members','Teams','Workflow rules','Workflow','Sprints','Calendars','Targets','Monthly records','Backup & restore'].map(t=>`<button data-tab="${t}" aria-pressed="${adminTab===t}">${t}</button>`).join('')}</div><div id="admin-body"></div>`;
   const b=$('#admin-body');
   if(['Workflow','Sprints','Monthly records','Backup & restore'].includes(adminTab)){renderExtraAdmin(b);return;}
   if(adminTab==='Members') {
     const m=edit||{country:'JO',role:'Dev',qa_slot:'Primary'};
-    b.innerHTML=panel(edit?'Edit member':'Add member',`<form id="member-form" class="form"><input type="hidden" name="id" value="${m.id||''}"><div class="fields">${field('Effective from (local time)','effective_at',localNow(),'datetime-local','required')}${field('Full name','name',m.name,'text','required')}${field('Jira account ID','jira_id',m.jira_id,'text','required')}${select('Role','role',choices(['Dev','QA','TPM'],m.role))}<div id="member-single-team">${select('Team (developer)','team_id',opts(state.teams.filter(t=>!t.archived),m.team_id))}</div><div id="member-team-options"></div>${select('Country','country',opts(state.countries,m.country,'name','code'))}</div><div class="toolbar"><button class="primary" ${state.teams.length?'':'disabled'}>Save member</button><button type="button" data-cancel>Clear form</button></div>${state.teams.length?'':'<p class="muted">Create a team first.</p>'}</form>`)+panel('Member directory',table(['Name / Jira ID','Role','Country','Team',''],state.members.map(m=>`<tr><td>${esc(m.name)}<div class="muted">${esc(m.jira_id)}</div></td><td>${m.role}${m.qa_slot?' · '+m.qa_slot:''}</td><td>${esc(countryName(m.country))}</td><td>${esc(memberTeams(m))}</td><td><button data-edit-member="${m.id}">Edit</button> ${m.archived?`<span class="badge">Archived</span> <button data-reactivate-member="${m.id}">Reactivate</button>`:`<button data-archive-member="${m.id}">Archive</button>`}</td></tr>`)));
+    b.innerHTML=panel(edit?'Edit member':'Add member',`<form id="member-form" class="form"><input type="hidden" name="id" value="${m.id||''}"><div class="fields">${field('Effective from (local time)','effective_at',localNow(),'datetime-local','required')}${field('Full name','name',m.name,'text','required')}${field('Jira account ID','jira_id',m.jira_id,'text','required')}${select('Role','role',choices(['Dev','QA','TPM'],m.role))}<div id="member-single-team">${select('Team (developer)','team_id',opts(state.teams.filter(t=>!t.archived),m.team_id))}</div><div id="member-team-options"></div>${select('Country','country',opts(state.countries,m.country,'name','code'))}</div><div class="toolbar"><button class="primary" ${state.teams.length?'':'disabled'}>Save member</button><button type="button" data-cancel>Clear form</button></div>${state.teams.length?'':'<p class="muted">Create a team first.</p>'}</form>`)+panel('Member directory',`<div class="toolbar" aria-label="Member directory filters"><label>Search name or Jira ID<input id="admin-member-search" type="search" value="${esc(adminMemberFilters.query)}" placeholder="Search people…"></label><label>Role<select id="admin-member-role"><option value="">All roles</option>${choices(['Dev','QA','TPM'],adminMemberFilters.role)}</select></label><label>Team<select id="admin-member-team"><option value="">All teams</option>${opts(state.teams,adminMemberFilters.team)}</select></label><label>Country<select id="admin-member-country"><option value="">All countries</option>${opts(state.countries,adminMemberFilters.country,'name','code')}</select></label><button type="button" id="clear-admin-member-filters">Clear filters</button></div><p id="admin-member-count" class="muted" role="status"></p><div id="admin-member-directory"></div>`);
   }
-  if(adminTab==='Members')renderMemberAssignmentFields(edit||{role:'Dev'});
+  if(adminTab==='Members'){renderMemberAssignmentFields(edit||{role:'Dev'});renderAdminMemberDirectory();}
   if(adminTab==='Teams') b.innerHTML=panel('Create team',`<form id="team-form" class="form"><input name="id" type="hidden" value="${edit?.id||''}">${field('Team name','name',edit?.name||'','text','required')}<button class="primary">Create team</button></form>`)+state.teams.map(t=>panel(esc(t.name),`<p class="muted">Use Members to assign or move people.</p><div class="toolbar"><button data-edit-team="${t.id}">Rename team</button>${t.archived?`<span class="badge">Archived</span> <button data-reactivate-team="${t.id}">Reactivate</button>`:`<button data-archive-team="${t.id}">Archive empty team</button>`}</div>${['Dev','QA','TPM'].map(r=>`<div class="row"><span>${r}</span><span>${state.members.filter(m=>!m.archived&&memberInTeam(m,t.id)&&m.role===r).map(m=>esc(m.name)+(m.role==='QA'?' ('+memberAssignments(m).find(a=>a.team_id===t.id)?.qa_slot+')':'')).join(', ')||'Unassigned'}</span></div>`).join('')}`)).join('');
   if(adminTab==='Workflow rules') {
     const r=edit||{status:'In Progress',severity:'High',sp:3,days:2,initial:2,daily:1};
@@ -191,6 +206,7 @@ function renderAdmin() {
 }
 function object(form){const d=Object.fromEntries(new FormData(form));if(d.id==='')delete d.id;return d;}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try {
+  if(b.id==='clear-admin-member-filters'){adminMemberFilters={query:'',role:'',team:'',country:''};for(const id of ['search','role','team','country'])$('#admin-member-'+id).value='';renderAdminMemberDirectory();}
   if(b.dataset.range){
     activePreset=b.dataset.range;
     await render();
@@ -210,6 +226,8 @@ document.addEventListener('click',async e=>{const b=e.target.closest('button');i
   if(b.id==='backup'){const r=await api('backup',{});await reload();if(page==='Administration')renderAdmin();announce('Backup created in data/backups/'+r.filename);}
 }catch(error){announce(error.message,true);b.disabled=false;}});
 document.addEventListener('change',e=>{try {
+  const adminFilters={'admin-member-role':'role','admin-member-team':'team','admin-member-country':'country'};
+  if(adminFilters[e.target.id]){adminMemberFilters[adminFilters[e.target.id]]=e.target.value;renderAdminMemberDirectory();}
   if(e.target.id==='start-date'||e.target.id==='end-date'){
     const a=$('#start-date').value,b=$('#end-date').value;
     if(!a||!b||a>b||b>today.toISOString().slice(0,10)){announce('Choose a valid start/end range ending no later than today.',true);return;}

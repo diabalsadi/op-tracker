@@ -233,6 +233,26 @@ try {
   const sharedState=await (await fetch(origin+'/api/state')).json();
   const sharedQa=sharedState.members.find(m=>m.jira_id==='shared-browser-qa');
   if(sharedQa?.team_assignments.length!==2||sharedQa.team_assignments.find(a=>a.team_id===createdTeam)?.qa_slot!=='Secondary')throw Error('QA per-team assignments did not persist');
+  await page.locator('#member-form input[name=name]').fill('Unsaved draft name');
+  await page.locator('#admin-member-search').fill('SHARED-BROWSER-QA');
+  await page.getByText(`1 of ${sharedState.members.length} people`,{exact:true}).waitFor();
+  if(await page.locator('#admin-member-directory [data-edit-member]').count()!==1)throw Error('Administration search did not match Jira ID');
+  if(await page.locator('#member-form input[name=name]').inputValue()!=='Unsaved draft name')throw Error('Search discarded an unsaved member edit');
+  await page.locator('#admin-member-search').fill('اسم عربي');
+  await page.locator('#admin-member-directory [data-edit-member="1"]').waitFor();
+  await page.locator('#clear-admin-member-filters').click();
+  await page.locator('#admin-member-role').selectOption('TPM');
+  await page.locator('#admin-member-country').selectOption('DO');
+  await page.locator('#admin-member-team').selectOption(String(createdTeam));
+  await page.locator('#admin-member-directory [data-edit-member="2"]').waitFor();
+  if(await page.locator('#admin-member-directory [data-edit-member]').count()!==1)throw Error('Combined member filters failed for a secondary team');
+  await page.locator('#admin-member-country').selectOption('JO');
+  await page.getByText('No records for this selection.',{exact:true}).waitFor();
+  await page.locator('#admin-member-role').selectOption('QA');
+  await page.locator(`#admin-member-directory [data-edit-member="${sharedQa.id}"]`).waitFor();
+  await scan('Administration member search and filters');
+  await page.locator('#clear-admin-member-filters').click();
+  if(await page.locator('#admin-member-directory [data-edit-member]').count()!==sharedState.members.length)throw Error('Clear member filters did not restore directory');
   await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}
