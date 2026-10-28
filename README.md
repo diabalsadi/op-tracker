@@ -104,3 +104,5 @@ The browser check starts an isolated temporary database, exercises navigation, d
 Chart.js is vendored with its license header. Fonts use installed Inter/Montserrat where available and system fallbacks; there are no external font or analytics requests.
 
 Scores show **Not yet assessed** until there is a completion credit, a score event, or enough observed working time to evaluate a configured duration allowance. Unassessed months are excluded from score averages and do not receive a performance rank. Existing finalized records retain their saved scores. A single CSV snapshot cannot establish earlier status durations; importing further snapshots builds the assessment history.
+
+For an explicitly shared HTTPS tunnel, run `python server.py --public-url https://YOUR-HOST.ngrok-free.app`. To retain the address across normal restarts, put a JSON list of exact HTTPS origins in `data/public-origins.json`, for example `["https://YOUR-HOST.ngrok-free.app"]`. Localhost remains available. Public access exposes the same full application, including administration and database export, without a login. Unlisted hosts and cross-origin browser writes remain blocked.

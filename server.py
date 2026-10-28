@@ -62,9 +62,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def request_origins(self):
+        host = self.headers.get('Host')
+        origins = [f'http://127.0.0.1:{self.server.server_port}',
+                   f'http://localhost:{self.server.server_port}']
+        origins += getattr(self.server, 'public_origins', [])
+        return {origin for origin in origins if urlparse(origin).netloc == host}
+
     def do_GET(self):
-        if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
-            return self.reply(403, {'error': 'Use the localhost application address'})
+        if not self.request_origins():
+            return self.reply(403, {'error': 'Use a configured application address'})
         parsed = urlparse(self.path)
         if not parsed.path.startswith('/api/'):
             file=(ROOT/'web'/unquote(parsed.path).lstrip('/')).resolve() if parsed.path!='/' else ROOT/'web'/'index.html'
@@ -94,11 +101,10 @@ class Handler(BaseHTTPRequestHandler):
             tracker.db.close()
 
     def do_POST(self):
-        # Block browser requests originating outside this localhost app (no login).
-        host=self.headers.get('Host')
-        expected = f'http://{host}'
-        if host not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}') or self.headers.get('Origin') not in (None, expected) or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-            return self.reply(403, {'error': 'Use the local application origin and JSON requests'})
+        # Public tunnel addresses must be explicitly configured; do not trust forwarded headers.
+        origins = self.request_origins()
+        if not origins or self.headers.get('Origin') not in (None, *origins) or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+            return self.reply(403, {'error': 'Use the configured application origin and JSON requests'})
         tracker = Tracker(self.server.db_path)
         route=urlparse(self.path).path
         try:
@@ -160,10 +166,22 @@ def main():
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--db', type=Path, default=DEFAULT_DB)
     parser.add_argument('--open', action='store_true', help='Open the local application in your browser')
+    parser.add_argument('--public-url', action='append', default=[], help='Additional allowed public origin, e.g. https://example.ngrok-free.app')
     args = parser.parse_args()
+    config = args.db.parent / 'public-origins.json'
+    public_origins = json.loads(config.read_text()) if config.exists() else []
+    if not isinstance(public_origins, list):
+        parser.error('public-origins.json must contain a list of HTTPS origins')
+    public_origins += args.public_url
+    for origin in public_origins:
+        parsed = urlparse(origin) if isinstance(origin, str) else None
+        if not parsed or parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+            parser.error('Public URLs must be HTTPS origins without credentials, paths, queries or fragments')
+    public_origins = [origin.rstrip('/') for origin in public_origins]
     Tracker(args.db).db.close()
     server = HTTPServer(('127.0.0.1', args.port), Handler)
     server.db_path = args.db
+    server.public_origins = public_origins
     server.state_cache=StateCache()
     if args.open:
         threading.Timer(0.5,lambda:webbrowser.open(f'http://127.0.0.1:{server.server_port}')).start()
