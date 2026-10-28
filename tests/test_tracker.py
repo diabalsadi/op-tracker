@@ -29,6 +29,16 @@ class TrackerTests(unittest.TestCase):
         self.t.db.close()
         self.tmp.cleanup()
 
+    def test_jira_embedded_quotes_after_sniffer_sample_preserve_rows(self):
+        out=io.StringIO();writer=csv.writer(out)
+        writer.writerow(['Issue key','Summary','Status','Assignee Id','Story Points','Priority','Description'])
+        writer.writerow(['OP-1','Plain','In Progress','dev-a',1,'High','A'*21000])
+        writer.writerow(['OP-2','Quoted','In Progress','dev-a',2,'High','First line, with "quoted text"\nSecond line, with "more quotes"'])
+        writer.writerow(['OP-3','After multiline','Closed','dev-a',3,'High','Last row'])
+        result=self.t.import_csv(out.getvalue(),'quoted.csv','2026-10-27T12:00:00Z',preview=True)
+        self.assertEqual(result['count'],3)
+        self.assertEqual([r['key'] for r in result['sample']],['OP-1','OP-2','OP-3'])
+
     def test_daily_updates_comments_and_duplicate(self):
         one = export(comment=json.dumps({'author':'dev-a','at':'2026-10-19T10:00:00Z','body':'Started'}))
         self.t.import_csv(one, 'day1.csv', '2026-10-19T12:00:00Z')

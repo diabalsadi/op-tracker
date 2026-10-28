@@ -212,7 +212,9 @@ class Tracker:
             dialect = csv.Sniffer().sniff(raw[:20000], delimiters=',;\t')
         except csv.Error:
             dialect = csv.excel
-        reader = csv.reader(io.StringIO(raw.lstrip('\ufeff')), dialect)
+        # Jira exports use standard doubled double quotes, even when the sample
+        # contains none. Sniff only the delimiter; guessed quoting can split rows.
+        reader = csv.reader(io.StringIO(raw.lstrip('\ufeff')), delimiter=dialect.delimiter)
         export_timezone = (mapping or {}).get('_timezone','UTC')
         try:
             export_tz=ZoneInfo(export_timezone)
