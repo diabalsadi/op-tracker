@@ -32,6 +32,8 @@ try {
     await page.setViewportSize({width:1280,height:960});
   }
   await page.goto(origin);await page.locator('#delivery-chart').waitFor();
+  for(const id of ['workflow-chart','util-chart','score-chart','duration-chart'])await page.locator('#'+id).waitFor();
+  if(await page.locator('nav button').count()!==6||await page.locator('#content table').count())throw Error('Stats still has redundant pages or member tables');
   const workflow=await page.evaluate(()=>{const c=Chart.getChart('workflow-chart');return {labels:c.data.labels,counts:c.data.datasets[0].data};});
   if(workflow.labels.includes('External Only')||workflow.counts.reduce((a,b)=>a+b,0)!==1)throw Error('Workflow chart included an unconfigured assignee');
   const utcNow=new Date(), dateEnd=utcNow.toISOString().slice(0,10), year=utcNow.getUTCFullYear();
@@ -53,7 +55,7 @@ try {
   await page.waitForFunction(y=>document.querySelector('#start-date').value===y+'-01-01'&&document.querySelector('[data-range="year"]').getAttribute('aria-pressed')==='true',year);
   await page.locator('[data-range="month"]').focus();await page.keyboard.press('Enter');
   await page.locator('[data-range="month"][aria-pressed=true]').waitFor();
-  for(const name of ['Overview','Delivery','Utilization','Performance','Rankings','Members','Tickets','Imports','Administration']){
+  for(const name of ['Stats','Rankings','Members','Tickets','Imports','Administration']){
     await page.locator(`nav button[data-page="${name}"]`).click();await page.waitForFunction(n=>document.querySelector('#title').textContent===n,name);
     if(name==='Rankings')for(const scope of ['Team','Role','Individual']){await page.locator('#ranking-scope').selectOption(scope);await page.waitForFunction(s=>document.querySelector('#ranking-scope')?.value===s&&document.querySelector('#content h2')?.textContent===s+' ranking',scope);}
     await scan(name);
@@ -87,7 +89,7 @@ try {
   await page.locator('[data-tab="Workflow"]').click();
   await page.locator('#workflow-form input[name=name]').fill('Awaiting Release');
   await page.locator('#workflow-form button.primary').click();await page.getByText('Saved to your local database.',{exact:true}).waitFor();
-  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#start-date').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#start-date').waitFor();
   await page.locator('#start-date').fill('2026-07-01');await page.locator('#start-date').dispatchEvent('change');await page.waitForTimeout(150);
   await page.locator('#end-date').fill('2026-09-30');await page.locator('#end-date').dispatchEvent('change');await page.waitForTimeout(150);
   await page.getByText('48 SP target · Selected dates',{exact:true}).waitFor();
@@ -128,7 +130,7 @@ try {
   await page.locator('#csv-file').setInputFiles(upload);
   await page.locator('#import-form button.primary').click();await page.locator('#commit-import').waitFor();
   await page.locator('#commit-import').click();await page.getByText('Imported 1 tickets. Preserved prior snapshots.',{exact:true}).waitFor();
-  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#export-report').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#export-report').waitFor();
   const downloadPromise=page.waitForEvent('download');await page.locator('#export-report').click();
   const download=await downloadPromise;await download.saveAs(path.join(folder,'export.csv'));
   if(!fs.readFileSync(path.join(folder,'export.csv'),'utf8').includes('Delivered SP'))throw Error('CSV export missing header');
@@ -181,7 +183,7 @@ try {
   ].map(([key,title,status,sp])=>[key,title,status,'example-profile',sp].join(',')).join('\n')});
   await page.reload();await page.locator('#delivery-chart').waitFor();
   await page.locator('nav button[data-page="Members"]').click();
-  await page.locator(`[data-person="${profileMember.id}"]`).click();
+  await page.locator(`#members-results [data-person="${profileMember.id}"]`).click();
   await page.getByText('6 tickets · 17 SP',{exact:true}).waitFor();
   if(await page.locator('#profile-ticket-list [data-ticket]').count()!==6)throw Error('Member tickets missing');
   await page.locator('#profile-ticket-status').selectOption('Code Review');
@@ -275,19 +277,19 @@ try {
   if(JSON.stringify(beforeRecalculation.monthly_records)!==JSON.stringify(afterRecalculation.monthly_records))throw Error('Recalculate changed finalized monthly revisions');
   await page.getByText('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.',{exact:true}).waitFor();
   if(await page.locator('#member-form input[name=name]').inputValue()!=='Unsaved draft name')throw Error('Recalculate discarded an unsaved member edit');
-  await page.locator('nav button[data-page="Performance"]').click();await page.locator('#score-chart').waitFor();
+  await page.locator('nav button[data-page="Members"]').click();await page.locator('#members-results').waitFor();
   const performanceRequests=apiRequests.length;
   await page.locator('#people-search').fill('SHARED-BROWSER-QA');
   await page.locator('#people-position').selectOption('QA');
-  await page.locator(`#performance-results [data-person="${sharedQa.id}"] >> nth=0`).waitFor();
+  await page.locator(`#members-results [data-person="${sharedQa.id}"]`).waitFor();
   if(new Set(await page.locator('#performance-results [data-person]').evaluateAll(nodes=>nodes.map(n=>n.dataset.person))).size!==1)throw Error('Performance people filters failed');
   if(apiRequests.length!==performanceRequests)throw Error('Performance search recalculated reports');
   await page.locator('#team').selectOption(String(createdTeam));
-  await page.locator(`#performance-results [data-person="${sharedQa.id}"] >> nth=0`).waitFor();
+  await page.locator(`#members-results [data-person="${sharedQa.id}"]`).waitFor();
   await page.locator('#country').selectOption('AM');
   await page.getByText('No records for this selection.',{exact:true}).waitFor();
   await page.locator('#country').selectOption('JO');
-  await page.locator(`#performance-results [data-person="${sharedQa.id}"] >> nth=0`).waitFor();
+  await page.locator(`#members-results [data-person="${sharedQa.id}"]`).waitFor();
   await scan('Performance search and position/team filters');
   await page.locator('nav button[data-page="Rankings"]').click();await page.locator('#rank-chart').waitFor();
   await page.locator(`#ranking-results [data-person="${sharedQa.id}"]`).waitFor();
@@ -303,14 +305,14 @@ try {
   await page.waitForFunction(()=>document.querySelector('#ranking-results h2')?.textContent==='Role ranking');
   if(await page.locator('#ranking-results tbody tr').count()!==1)throw Error('Position filter was ignored by role rankings');
   await scan('Ranking search and position/team filters');
-  await page.locator('nav button[data-page="Performance"]').click();
+  await page.locator('nav button[data-page="Members"]').click();
   await page.locator('#review-people').waitFor();await page.locator('#review-tickets').waitFor();
   await page.locator('#people-search').fill('no matching person');
   await page.getByText('No people meet these review criteria.',{exact:true}).waitFor();
   await page.getByText('No ticket deductions recorded for these filters.',{exact:true}).waitFor();
   await page.locator('#clear-people-filters').click();
   await page.locator('#team').selectOption('');await page.locator('#country').selectOption('');
-  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#delivery-chart').waitFor();
   await page.locator('nav button[data-page="Administration"]').click();
   await page.locator('[data-tab="Workflow rules"]').click();
   await page.locator('#rule-form [name=status]').selectOption('Ready for Release');
@@ -332,7 +334,7 @@ try {
   const databaseDownload=await downloadEvent;
   const databaseBytes=fs.readFileSync(await databaseDownload.path());
   if(databaseBytes.subarray(0,16).toString()!=='SQLite format 3\0')throw Error('Database export was not SQLite');
-  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#delivery-chart').waitFor();
   await page.locator('nav button[data-page="Members"]').click();
   await page.locator('#members-results').waitFor();
   const sortRequests=apiRequests.length;
@@ -353,7 +355,26 @@ try {
   await page.locator('[data-member-sort="sp"]').focus();await page.keyboard.press('Enter');
   await page.locator('th[aria-sort="descending"] [data-member-sort="sp"]').waitFor();
   await scan('Sortable Members table');
-  await page.locator('nav button[data-page="Overview"]').click();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#delivery-chart').waitFor();
+  await post('import/commit',{filename:'sorting.csv',snapshot_at:'2026-10-21T12:00:00Z',csv:'Issue key,Summary,Status,Assignee Id,Story Points,Priority\nSORT-2,Bravo,In Progress,dev-a,2,High\nSORT-10,Alpha,Code Review,dev-a,10,High\nSORT-3,Charlie,QA,dev-a,,High\n'});
+  await page.reload();await page.locator('#delivery-chart').waitFor();
+  await page.locator('nav button[data-page="Tickets"]').click();await page.locator('[data-ticket-table]').waitFor();
+  const ticketSortRequests=apiRequests.length;
+  for(const [key,column] of [['key',0],['summary',1],['status',2],['owner',3],['sp',4],['last_seen',5]]){
+    for(const direction of ['descending','ascending']){
+      await page.locator(`[data-ticket-sort="${key}"]`).click();
+      await page.locator(`th[aria-sort="${direction}"] [data-ticket-sort="${key}"]`).waitFor();
+      const values=await page.locator('[data-ticket-table] tbody tr').evaluateAll((rows,{column,key})=>rows.map(row=>{const text=row.cells[column].textContent.trim();return text==='N/A'||text==='Unknown timestamp'?null:key==='sp'?Number(text):key==='last_seen'?Date.parse(text):text;}),{column,key});
+      let missing=false,previous=null;
+      for(const value of values){if(value===null){missing=true;continue;}const order=previous===null?0:typeof value==='number'?previous-value:previous.localeCompare(value,undefined,{numeric:true,sensitivity:'base'});if(missing||(direction==='descending'?order<0:order>0))throw Error('Ticket sort failed: '+key+' '+direction);previous=value;}
+    }
+  }
+  if(apiRequests.length!==ticketSortRequests)throw Error('Ticket sorting triggered server calls');
+  await page.locator('[data-ticket-sort="key"]').focus();await page.keyboard.press('Enter');
+  await page.locator('th[aria-sort="descending"] [data-ticket-sort="key"]').waitFor();
+  await scan('Sortable ticket table');
+  await page.locator('[data-ticket="SORT-2"]').click();await page.locator('#comment-form').waitFor();
+  await page.locator('nav button[data-page="Stats"]').click();await page.locator('#delivery-chart').waitFor();
   const sizes=[1280,1024,736,540,360,320];
   for(const width of sizes){await page.setViewportSize({width,height:960});await page.waitForTimeout(70);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);if(overflow)throw Error('Page overflow at '+width);}
   const contrast=await page.locator('.value').first().evaluate(el=>({color:getComputedStyle(el).color,font:getComputedStyle(el).fontSize}));

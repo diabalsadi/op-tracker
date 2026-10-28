@@ -4,7 +4,7 @@ function renderDurations(){
   const rows=state.durations.filter(d=>(!team||d.team_id===Number(team))&&d.start.slice(0,10)<=endDate&&d.end.slice(0,10)>=startDate&&(!country||state.members.find(m=>m.id===d.member_id)?.country===country));
   const chart=document.createElement('div');chart.innerHTML=chartBox('duration-chart','Status duration vs configured allowance','Complete observed intervals overlapping the date selection; missing allowances stay unknown.');$('#content').append(chart);
   const statuses=[...new Set(rows.map(r=>r.status))];const mean=(status,key)=>{const values=rows.filter(r=>r.status===status&&r[key]!==null).map(r=>r[key]);return values.length?values.reduce((a,b)=>a+b,0)/values.length:null;};draw('duration-chart','bar',statuses,[series('Observed working days',statuses.map(s=>mean(s,'working_days'))),series('Configured allowance',statuses.map(s=>mean(s,'allowed_days')),'#cad8d0')],'Average working days',null,'Status');
-  const section=document.createElement('section');section.className='panel';section.innerHTML='<h2>Observed status duration vs allowance</h2>'+table(['Ticket','Status','Severity / SP','Working days','Allowed days','Evidence'],rows.map(d=>`<tr><td>${link(d.key,`data-ticket="${d.key}"`)}</td><td>${esc(d.status)}</td><td>${esc(d.severity)} / ${fmt(d.sp)}</td><td>${fmt(d.working_days)}</td><td>${fmt(d.allowed_days)}</td><td>Snapshot interval</td></tr>`));$('#content').append(section);
+
 }
 let rankingSources=null;
 async function renderRankings(){

@@ -53,7 +53,7 @@ Unattributable or undated comments remain visible but cannot establish a follow-
 - Monthly performance records are calculated separately. Multi-month views average eligible monthly records; selecting part of a month does not create another score baseline.
 - Individual, role and team rankings have separate performance/utilization views. Roles without delivery targets are not assigned utilization values.
 - Annual member profiles include interactive monthly charts, evidence and record status. Each profile also lists its latest assigned/accountable tickets across all dates, with counts and current SP totals by status. Select a status or click its summary row to filter the ticket list; click a ticket key to inspect its lifecycle. These status totals are separate from completed delivery credit. Months before joining or during inactive periods are excluded.
-- Delivery reports include observed status durations versus configured allowances. Click a ticket for snapshots, changes, comments, score events and corrections.
+- Stats combines delivery, utilization, member scores, workflow counts and observed status-duration charts. Members contains the searchable person-level performance table and review lists. Member metrics and all ticket-table columns support click-to-sort in both directions; missing values stay last. Click a ticket for snapshots, changes, comments, score events and corrections.
 - The current workflow snapshot counts only tickets whose current Jira assignee matches an active configured member, using that member’s team/country filters. Unmapped tickets remain available in Tickets and Imports.
 - CSV report exports use the selected filters. Workflow charts show latest observed state and are labeled accordingly.
 

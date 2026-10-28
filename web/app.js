@@ -1,12 +1,12 @@
 'use strict';
 const $ = s => document.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const pages = ['Overview','Delivery','Utilization','Performance','Rankings','Members','Tickets','Imports','Administration'];
+const pages = ['Stats','Rankings','Members','Tickets','Imports','Administration'];
 const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let today = new Date();
 let activePreset='month';
 let adminMemberFilters={query:'',role:'',team:'',country:''};
-let state, page = 'Overview', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
+let state, page = 'Stats', period = today.toISOString().slice(0,7), team = '', country = '', adminTab = 'Members';
 let startDate = period+'-01', endDate = today.toISOString().slice(0,10);
 let peopleSearch='',peoplePosition='';
 let memberSort={key:null,direction:'desc'};
@@ -95,7 +95,27 @@ function memberTable(ms,sortable=false) {
   }
   return html;
 }
-function ticketsTable(ts) { return table(['Ticket','Summary','Status','Owner','SP','Last seen'],ts.map(t=>`<tr><td>${link(t.key,`data-ticket="${esc(t.key)}"`)}</td><td>${esc(t.summary)}</td><td><span class="badge ${['blocked','on hold'].includes(t.status.toLowerCase())?'warning':''}">${esc(t.status)}</span></td><td>${esc(memberName(t.member_id))}</td><td>${fmt(t.sp)}</td><td>${dateLabel(t.last_seen)}</td></tr>`)); }
+let ticketSort={key:null,direction:'desc'},ticketTableId=0;
+const ticketTables=new Map();
+function ticketsTable(ts,id=null) {
+  if(id===null){id=String(++ticketTableId);if(ticketTables.size>=30)ticketTables.delete(ticketTables.keys().next().value);}
+  ticketTables.set(id,ts);
+  const value=(t,key)=>key==='owner'?memberName(t.member_id):key==='last_seen'?(t.last_seen?Date.parse(t.last_seen):null):t[key];
+  const rows=[...ts];
+  if(ticketSort.key)rows.sort((a,b)=>{
+    const x=value(a,ticketSort.key),y=value(b,ticketSort.key);
+    if(x===null||x===undefined)return y===null||y===undefined?a.key.localeCompare(b.key,undefined,{numeric:true}):1;
+    if(y===null||y===undefined)return -1;
+    const order=typeof x==='number'?x-y:String(x).localeCompare(String(y),undefined,{numeric:true,sensitivity:'base'});
+    return (ticketSort.direction==='asc'?order:-order)||a.key.localeCompare(b.key,undefined,{numeric:true});
+  });
+  let html=table(['Ticket','Summary','Status','Owner','SP','Last seen'],rows.map(t=>`<tr><td>${link(t.key,`data-ticket="${esc(t.key)}"`)}</td><td>${esc(t.summary)}</td><td><span class="badge ${['blocked','on hold'].includes(t.status.toLowerCase())?'warning':''}">${esc(t.status)}</span></td><td>${esc(memberName(t.member_id))}</td><td>${fmt(t.sp)}</td><td>${dateLabel(t.last_seen)}</td></tr>`));
+  for(const [key,label] of [['key','Ticket'],['summary','Summary'],['status','Status'],['owner','Owner'],['sp','SP'],['last_seen','Last seen']]){
+    const active=ticketSort.key===key,direction=active?ticketSort.direction:null;
+    html=html.replace(`<th>${label}</th>`,`<th aria-sort="${direction==='asc'?'ascending':direction==='desc'?'descending':'none'}"><button type="button" class="link" data-ticket-sort="${key}">${label} ${active?(direction==='desc'?'↓':'↑'):'↕'}</button></th>`);
+  }
+  return `<div data-ticket-table="${id}">${html}</div>`;
+}
 function chartBox(id,title,note='Hover for values. Click a legend item to toggle its series.') { return panel(title,`<div class="chart"><canvas id="${id}" role="img" aria-label="${esc(title)}; values are available in the accompanying tables."></canvas></div><p class="chart-note">${note}</p>`); }
 function draw(id,type,labels,datasets,yTitle,click,xTitle='Month') {
   const el = $('#'+id); if(!el) return;
@@ -123,20 +143,18 @@ async function render() {
   const totalTarget=dev.reduce((s,m)=>s+rangeTarget(m),0);
   const stats=`<div class="grid">${[['Delivered SP',fmt(sum),fmt(totalTarget)+' SP target · Selected dates'],['Dev utilization',totalTarget?fmt(sum/totalTarget*100)+'%':'N/A',dev.length+' developers'],['Average score',scoreLabel(avg),'Average of monthly scores · Selected months']].map(([l,v,n])=>`<div class="panel"><div class="muted">${l}</div><strong class="value">${v}</strong><div class="muted">${n}</div></div>`).join('')}</div>`;
   const content=$('#content');
-  if(page==='Overview') {
-    content.innerHTML=stats+`<div class="columns">${chartBox('delivery-chart','Developer delivery · Selected dates')}${chartBox('workflow-chart','Current workflow snapshot','Configured assignees only. Click a status to open its tickets. Latest observed state, across all dates.')}</div>`+panel('Recent tickets',ticketsTable(ts))+panel('Data quality',`<p class="muted">${esc(state.calculation_note)}</p>${state.warnings.slice(0,12).map(w=>`<div class="row">${esc(w)}</div>`).join('')||'<p class="muted">No unresolved data warnings.</p>'}`);
+  if(page==='Stats') {
+    content.innerHTML=stats+`<div class="columns">${chartBox('delivery-chart','Developer delivery · Selected dates')}${chartBox('workflow-chart','Current workflow snapshot','Configured assignees only. Click a status to open its tickets. Latest observed state, across all dates.')}${chartBox('util-chart','Developer utilization vs 100% target','Click a bar to open the person’s annual dashboard.')}${chartBox('score-chart','Member score comparison','Unassessed scores remain unknown. Click a bar to open the annual dashboard.')}</div>`;
     draw('delivery-chart','bar',dev.map(m=>m.name),[series('Done SP',dev.map(m=>metric(m).sp)),{...series('Period target',dev.map(rangeTarget),'#cad8d0','line'),borderDash:[5,5]}],'Story points',i=>profile(dev[i].id),'Developer');
-    const workflowRows=workflowTickets(),statuses=[...new Set(workflowRows.map(t=>t.status))]; draw('workflow-chart','bar',statuses,[series('Tickets',statuses.map(s=>workflowRows.filter(t=>t.status===s).length))],'Ticket count',async i=>{page='Tickets';await render();$('#content').innerHTML=panel(esc(statuses[i]),ticketsTable(workflowRows.filter(t=>t.status===statuses[i])));},'Status');
+    draw('util-chart','bar',dev.map(m=>m.name),[series('Utilization (%)',dev.map(m=>metric(m).util)),{...series('Target',dev.map(()=>100),'#cad8d0','line'),borderDash:[5,5]}],'Utilization (%)',i=>profile(dev[i].id),'Developer');
+    draw('score-chart','bar',ms.map(m=>m.name),[series('Score',ms.map(m=>m.score))],'Score points',i=>profile(ms[i].id),'Member');
+    const workflowRows=workflowTickets(),statuses=[...new Set(workflowRows.map(t=>t.status))];draw('workflow-chart','bar',statuses,[series('Tickets',statuses.map(status=>workflowRows.filter(t=>t.status===status).length))],'Ticket count',async i=>{page='Tickets';await render();$('#content').innerHTML=panel(esc(statuses[i]),ticketsTable(workflowRows.filter(t=>t.status===statuses[i])));},'Status');
+    renderDurations();
+    content.insertAdjacentHTML('beforeend',panel('Data quality',`<p class="muted">${esc(state.calculation_note)}</p>${state.warnings.slice(0,12).map(w=>`<div class="row">${esc(w)}</div>`).join('')||'<p class="muted">No unresolved data warnings.</p>'}`));
   }
-  if(page==='Delivery'||page==='Utilization') {
-    content.innerHTML=stats+chartBox('util-chart',page==='Delivery'?'Completed story points by developer':'Developer utilization vs 100% target','Click a bar to inspect the developer’s yearly history.')+panel('Developer records',memberTable(dev));
-    const utilization=page==='Utilization';draw('util-chart','bar',dev.map(m=>m.name),[series(utilization?'Utilization (%)':'Done SP',dev.map(m=>utilization?metric(m).util:metric(m).sp)),{...series('Target',dev.map(m=>utilization?100:rangeTarget(m)),'#cad8d0','line'),borderDash:[5,5]}],utilization?'Utilization (%)':'Story points',i=>profile(dev[i].id),'Developer');
-  }
-  if(page==='Performance')renderPerformance();
-  if(page==='Members')content.innerHTML=panel('Team members',`<div id="members-results">${memberTable(ms,true)}</div>`)+`<button class="primary" data-admin="Members">Manage members & assignments</button>`;
+  if(page==='Members')renderPerformance();
   if(page==='Tickets')content.innerHTML=panel('Ticket explorer',ticketsTable(ts));
   if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));
-  if(page==='Delivery')renderDurations();
   if(page==='Imports')renderImport();
   if(page==='Administration'){renderAdmin();appendAdminHistory();}
 }
@@ -148,7 +166,7 @@ function peopleFilterControls() {
   return `<div class="toolbar" aria-label="People filters"><label>Search name or Jira ID<input id="people-search" type="search" value="${esc(peopleSearch)}" placeholder="Search people…"></label><label>Position<select id="people-position"><option value="">All positions</option>${[{id:'Dev',name:'Developer'},{id:'QA',name:'QA'},{id:'TPM',name:'TPM'}].map(r=>`<option value="${r.id}" ${peoplePosition===r.id?'selected':''}>${r.name}</option>`).join('')}</select></label><span class="muted">Combine with the Team and Country filters above.</span><button type="button" id="clear-people-filters">Clear search & position</button></div>`;
 }
 function renderPerformance() {
-  $('#content').innerHTML=peopleFilterControls()+`<div id="performance-results"></div>`;
+  $('#content').innerHTML=peopleFilterControls()+`<div id="performance-results"></div><button class="primary" data-admin="Members">Manage members & assignments</button>`;
   updatePerformance();
 }
 function performanceReview(rows) {
@@ -170,14 +188,10 @@ function performanceReview(rows) {
   return panel('People to look into',`<p class="muted">Review prompts: insufficient scoring evidence, score below 100, developer delivery below the selected period’s target, or recorded deductions. Uses your search, position, team, country and date filters. Scores retain the monthly calculation shown above.</p><div id="review-people">${people.length?table(['Person','Position','Why review'],people.map(({m,reasons})=>`<tr><td>${link(m.name,`data-person="${m.id}"`)}</td><td>${esc(m.role)}</td><td>${reasons.map(esc).join(' · ')}</td></tr>`)):'<p class="muted">No people meet these review criteria.</p>'}</div>`)+panel('Tickets to look into',`<p class="muted">Tickets with deductions recorded during the selected dates, highest total first. Totals include each accountable person; finalized records are preserved. Click a ticket to inspect its timeline and deductions.</p><div id="review-tickets">${flagged.length?table(['Ticket','Deduction points','People affected','Reason','Latest deduction'],flagged.map(t=>`<tr><td>${link(t.key,`data-ticket="${esc(t.key)}"`)}</td><td>${fmt(t.points)}</td><td>${[...t.people.values()].map(esc).join(', ')}</td><td>${[...t.reasons].map(esc).join(' · ')}</td><td>${dateLabel(t.last)}</td></tr>`)):'<p class="muted">No ticket deductions recorded for these filters.</p>'}</div>`);
 }
 function updatePerformance() {
-  const rows=filteredPeople(getMembers()),dev=rows.filter(m=>m.target>0);
-  const total=key=>dev.reduce((sum,m)=>sum+(m[key]||0),0),scores=rows.filter(m=>m.score!==null);
-  const target=total('target'),sp=total('sp'),score=scores.length?scores.reduce((sum,m)=>sum+m.score,0)/scores.length:null;
-  destroyCharts();
-  $('#performance-results').innerHTML=`<p class="muted" role="status">${rows.length} people match your filters</p><div class="grid">${[['Delivered SP',fmt(sp)],['Dev utilization',target?fmt(sp/target*100)+'%':'N/A'],['Average score',scoreLabel(score)]].map(([label,value])=>`<div class="panel"><div class="muted">${label}</div><strong class="value">${value}</strong></div>`).join('')}</div>`+chartBox('score-chart','Member comparison','Click a bar to open the annual person dashboard.')+panel('Monthly performance',memberTable(rows))+performanceReview(rows);
-  draw('score-chart','bar',rows.map(m=>m.name),[series('Score',rows.map(m=>m.score))],'Score points',i=>profile(rows[i].id),'Member');
+  const rows=filteredPeople(getMembers());
+  $('#performance-results').innerHTML=`<p class="muted" role="status">${rows.length} people match your filters</p>`+panel('Member performance',`<div id="members-results">${memberTable(rows,true)}</div>`)+performanceReview(rows);
 }
-function updatePeopleFilters(){if(page==='Performance')updatePerformance();if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));}
+function updatePeopleFilters(){if(page==='Members')updatePerformance();if(page==='Rankings')renderRankings().catch(e=>announce(e.message,true));}
 document.addEventListener('input',e=>{if(e.target.id==='people-search'){peopleSearch=e.target.value;updatePeopleFilters();}});
 async function profile(id) {
   const seq=++renderSequence;
@@ -281,7 +295,8 @@ function renderAdmin() {
 }
 function object(form){const d=Object.fromEntries(new FormData(form));if(d.id==='')delete d.id;return d;}
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try {
-  if(b.dataset.memberSort&&page==='Members'){const key=b.dataset.memberSort;memberSort={key,direction:memberSort.key===key&&memberSort.direction==='desc'?'asc':'desc'};$('#members-results').innerHTML=memberTable(getMembers(),true);$('#members-results [data-member-sort="'+key+'"]').focus();return;}
+  if(b.dataset.ticketSort){const wrapper=b.closest('[data-ticket-table]'),id=wrapper.dataset.ticketTable,key=b.dataset.ticketSort,rows=ticketTables.get(id);if(!rows)return;ticketSort={key,direction:ticketSort.key===key&&ticketSort.direction==='desc'?'asc':'desc'};wrapper.outerHTML=ticketsTable(rows,id);$('[data-ticket-table="'+id+'"] [data-ticket-sort="'+key+'"]').focus();return;}
+  if(b.dataset.memberSort&&page==='Members'){const key=b.dataset.memberSort;memberSort={key,direction:memberSort.key===key&&memberSort.direction==='desc'?'asc':'desc'};$('#members-results').innerHTML=memberTable(filteredPeople(getMembers()),true);$('#members-results [data-member-sort="'+key+'"]').focus();return;}
   if(b.id==='recalculate'){const person=profileId,ticketId=ticketKey;b.disabled=true;announce('Recalculating live results…');state=await api('recalculate',{});stateDirty=false;updateDataStatus();if(person!==null)await profile(person);else if(ticketId)await ticket(ticketId);else if(page==='Administration')renderAdminMemberDirectory();else await render();announce('Calculations updated. Finalized monthly records are preserved; use Monthly records to create an explicit revision.');b.disabled=false;}
   if(b.id==='clear-people-filters'){peopleSearch='';peoplePosition='';$('#people-search').value='';$('#people-position').value='';updatePeopleFilters();}
   if(b.id==='clear-admin-member-filters'){adminMemberFilters={query:'',role:'',team:'',country:''};for(const id of ['search','role','team','country'])$('#admin-member-'+id).value='';renderAdminMemberDirectory();}
