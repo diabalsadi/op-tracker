@@ -31,5 +31,13 @@ class PublicOriginTests(unittest.TestCase):
                 self.assertEqual(request('GET','/','unlisted.ngrok-free.app'),403)
                 self.assertEqual(request('GET','/',f'localhost:{server.server_port}'),200)
                 self.assertEqual(request('POST','/api/save/teams','example.ngrok-free.app','http://example.ngrok-free.app',{'name':'Rejected'}),403)
+                server.allow_ngrok=True
+                self.assertEqual(request('GET','/','new-tunnel-123.ngrok-free.app'),200)
+                self.assertEqual(request('POST','/api/save/teams','new-tunnel-123.ngrok-free.app','https://new-tunnel-123.ngrok-free.app',{'name':'New tunnel team'}),200)
+                self.assertEqual(request('POST','/api/save/teams','new-tunnel-123.ngrok-free.app','https://other.ngrok-free.app',{'name':'Rejected'}),403)
+                self.assertEqual(request('POST','/api/save/teams','new-tunnel-123.ngrok-free.app','http://new-tunnel-123.ngrok-free.app',{'name':'Rejected'}),403)
+                for host in ['ngrok-free.app','new.ngrok-free.app.evil.example','nested.new.ngrok-free.app','-invalid.ngrok-free.app','arbitrary.example']:
+                    self.assertEqual(request('GET','/',host),403,host)
+
             finally:
                 server.shutdown();thread.join();server.server_close()

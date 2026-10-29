@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import mimetypes
+import re
 import sqlite3
 import threading
 import time
@@ -67,6 +68,8 @@ class Handler(BaseHTTPRequestHandler):
         origins = [f'http://127.0.0.1:{self.server.server_port}',
                    f'http://localhost:{self.server.server_port}']
         origins += getattr(self.server, 'public_origins', [])
+        if getattr(self.server, 'allow_ngrok', False) and re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ngrok-free\.app', host or '', re.IGNORECASE):
+            origins.append(f'https://{host}')
         return {origin for origin in origins if urlparse(origin).netloc == host}
 
     def do_GET(self):
@@ -173,6 +176,8 @@ def main():
     if not isinstance(public_origins, list):
         parser.error('public-origins.json must contain a list of HTTPS origins')
     public_origins += args.public_url
+    allow_ngrok = 'https://*.ngrok-free.app' in public_origins
+    public_origins = [origin for origin in public_origins if origin != 'https://*.ngrok-free.app']
     for origin in public_origins:
         parsed = urlparse(origin) if isinstance(origin, str) else None
         if not parsed or parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
@@ -182,6 +187,7 @@ def main():
     server = HTTPServer(('127.0.0.1', args.port), Handler)
     server.db_path = args.db
     server.public_origins = public_origins
+    server.allow_ngrok = allow_ngrok
     server.state_cache=StateCache()
     if args.open:
         threading.Timer(0.5,lambda:webbrowser.open(f'http://127.0.0.1:{server.server_port}')).start()
